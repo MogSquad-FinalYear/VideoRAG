@@ -1,0 +1,74 @@
+"""
+VideoRAG — Pydantic Models
+Request/response schemas for all API endpoints.
+"""
+
+from __future__ import annotations
+from typing import Optional
+from pydantic import BaseModel, Field
+
+
+# ── Execute (Video Upload) ───────────────────────────────────────────────────
+
+class ExecuteResponse(BaseModel):
+    task_id: str
+    status: str = "processing"
+    message: str = "Video upload received. Processing started."
+
+
+# ── Task Status ──────────────────────────────────────────────────────────────
+
+class TaskStatus(BaseModel):
+    task_id: str
+    status: str  # "processing" | "completed" | "failed"
+    progress: float = 0.0  # 0.0 to 1.0
+    message: str = ""
+    video_id: Optional[str] = None
+
+
+# ── Chat ─────────────────────────────────────────────────────────────────────
+
+class ChatRequest(BaseModel):
+    query: str = Field(..., min_length=1, description="Natural language question about the video(s)")
+    video_id: Optional[str] = Field(None, description="Optional: scope query to a specific video")
+    image_path: Optional[str] = Field(None, description="Optional: path to reference image for visual search")
+
+
+class SearchResult(BaseModel):
+    video_id: str
+    frame_number: Optional[int] = None
+    timestamp: Optional[float] = None
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
+    score: float = 0.0
+    content: str = ""  # caption or transcript text
+    frame_path: Optional[str] = None
+    source_index: str = ""  # "image" | "caption" | "speech"
+
+
+class VideoClip(BaseModel):
+    video_id: str
+    start_time: float
+    end_time: float
+    frame_paths: list[str] = []
+    description: str = ""
+
+
+class ChatResponse(BaseModel):
+    answer: str
+    clips: list[VideoClip] = []
+    sources: list[SearchResult] = []
+
+
+# ── Video Info ───────────────────────────────────────────────────────────────
+
+class VideoInfo(BaseModel):
+    video_id: str
+    filename: str
+    duration: Optional[float] = None
+    resolution: Optional[str] = None
+    fps: Optional[float] = None
+    frame_count: Optional[int] = None
+    status: str = "processing"  # "processing" | "completed" | "failed"
+    uploaded_at: Optional[str] = None
+    thumbnail: Optional[str] = None

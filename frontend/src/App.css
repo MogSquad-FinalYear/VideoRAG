@@ -1,0 +1,91 @@
+/* ══════════════════════════════════════════════════════════════════════════════
+   App Layout — Three-panel design
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+.app {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+/* ── Sidebar ───────────────────────────────────────────────────────────────── */
+.app__sidebar {
+  width: var(--sidebar-width);
+  min-width: var(--sidebar-width);
+  height: 100vh;
+  border-right: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  transition: all var(--transition-base);
+  z-index: var(--z-sidebar);
+  animation: slideInLeft var(--transition-slow) ease-out;
+}
+
+.app__sidebar--collapsed {
+  width: 64px;
+  min-width: 64px;
+}
+
+/* ── Main Chat ─────────────────────────────────────────────────────────────── */
+.app__main {
+  flex: 1;
+  min-width: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+  animation: fadeIn var(--transition-slow) ease-out;
+}
+
+/* ── Video Player Panel ────────────────────────────────────────────────────── */
+.app__player {
+  width: 420px;
+  min-width: 420px;
+  height: 100vh;
+  border-left: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  overflow-y: auto;
+}
+
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(20px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.animate-slideInRight {
+  animation: slideInRight var(--transition-slow) ease-out;
+}
+
+/* ── Responsive ────────────────────────────────────────────────────────────── */
+@media (max-width: 1024px) {
+  .app__player {
+    position: fixed;
+    right: 0;
+    top: 0;
+    width: 380px;
+    min-width: 380px;
+    z-index: 50;
+    box-shadow: -8px 0 32px rgba(0, 0, 0, 0.5);
+  }
+}
+
+@media (max-width: 768px) {
+  .app__sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: 50;
+    box-shadow: 8px 0 32px rgba(0, 0, 0, 0.5);
+  }
+
+  .app__sidebar--collapsed {
+    transform: translateX(-100%);
+    width: var(--sidebar-width);
+    min-width: var(--sidebar-width);
+  }
+
+  .app__player {
+    width: 100%;
+    min-width: 100%;
+  }
+}
