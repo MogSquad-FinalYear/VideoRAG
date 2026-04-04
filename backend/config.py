@@ -32,7 +32,7 @@ BLIP_MODEL = os.getenv("BLIP_MODEL", "Salesforce/blip-image-captioning-base")
 FRAME_SAMPLE_FPS = float(os.getenv("FRAME_SAMPLE_FPS", "1"))
 
 # Groq
-GROQ_MODEL = "llama-4-scout-17b-16e-instruct"
+GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
 # Server
 BACKEND_PORT = int(os.getenv("BACKEND_PORT", "8000"))

@@ -1,7 +1,41 @@
 /**
  * MessageBubble — Individual message display for user and AI messages.
+ * Supports basic markdown rendering for AI responses.
  */
 import './MessageBubble.css';
+
+/**
+ * Simple markdown-to-HTML converter for AI messages.
+ * Handles: newlines, **bold**, `code`, [timestamps], bullet lists.
+ */
+function renderMarkdown(text) {
+  if (!text) return '';
+
+  let html = text
+    // Escape HTML entities
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    // Bold **text**
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    // Inline code `text`
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    // Timestamp references [00:15] or [00:15 - 00:23]
+    .replace(/\[(\d{1,2}:\d{2}(?:\s*[-–]\s*\d{1,2}:\d{2})?)\]/g, '<span class="msg__timestamp">[$1]</span>')
+    // Bullet points
+    .replace(/^[-•]\s+(.+)$/gm, '<li>$1</li>')
+    // Numbered lists
+    .replace(/^\d+\.\s+(.+)$/gm, '<li>$1</li>')
+    // Double newlines = paragraph break
+    .replace(/\n\n/g, '</p><p>')
+    // Single newlines = line break
+    .replace(/\n/g, '<br/>');
+
+  // Wrap list items
+  html = html.replace(/(<li>.*?<\/li>)+/gs, '<ul>$&</ul>');
+
+  return `<p>${html}</p>`;
+}
 
 export default function MessageBubble({ message, onClipClick }) {
   const isUser = message.role === 'user';
@@ -29,8 +63,15 @@ export default function MessageBubble({ message, onClipClick }) {
         {/* Name */}
         <span className="msg__name">{isUser ? 'You' : 'Kubrick'}</span>
 
-        {/* Text */}
-        <div className="msg__text">{message.text}</div>
+        {/* Text — render markdown for AI, plain text for user */}
+        {isUser ? (
+          <div className="msg__text">{message.text}</div>
+        ) : (
+          <div
+            className="msg__text msg__text--markdown"
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(message.text) }}
+          />
+        )}
 
         {/* Source clips */}
         {message.clips && message.clips.length > 0 && (

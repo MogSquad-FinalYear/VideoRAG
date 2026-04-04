@@ -3,10 +3,12 @@ VideoRAG — ChromaDB Indexing Service
 Manages 3 vector collections: image (CLIP), caption (BLIP), speech (Whisper).
 """
 import logging
+import os
+from pathlib import Path
 import chromadb
 from chromadb.config import Settings
 
-from backend.config import CHROMADB_DIR, IMAGE_COLLECTION, CAPTION_COLLECTION, SPEECH_COLLECTION
+from backend.config import CHROMADB_DIR, IMAGE_COLLECTION, CAPTION_COLLECTION, SPEECH_COLLECTION, FRAMES_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +16,29 @@ _chroma_client = None
 _image_col = None
 _caption_col = None
 _speech_col = None
+
+
+def _to_url_path(absolute_path: str, video_id: str) -> str:
+    """Convert an absolute frame path to a relative URL path for the browser.
+    e.g. 'C:\\...\\data\\frames\\abc123\\frame_000007.jpg' -> '/frames/abc123/frame_000007.jpg'
+    """
+    try:
+        p = Path(absolute_path)
+        filename = p.name
+        return f"/frames/{video_id}/{filename}"
+    except Exception:
+        return absolute_path
+
+
+def _normalize_frame_path(frame_path: str, video_id: str) -> str:
+    """Ensure frame_path is a browser-friendly relative URL, not an absolute filesystem path."""
+    if not frame_path:
+        return ""
+    # Already a relative URL
+    if frame_path.startswith("/frames/"):
+        return frame_path
+    # Absolute path — convert to URL
+    return _to_url_path(frame_path, video_id)
 
 
 def get_chroma_client():
@@ -58,7 +83,7 @@ def index_frames(video_id: str, frame_paths: list[str], embeddings: list[list[fl
             "video_id": video_id,
             "frame_number": i,
             "timestamp": round(i / fps, 2),
-            "frame_path": path,
+            "frame_path": _to_url_path(path, video_id),  # Store as relative URL
         })
 
     # ChromaDB has a batch limit, chunk if needed
@@ -88,7 +113,7 @@ def index_captions(video_id: str, frame_paths: list[str], captions: list[str], f
             "video_id": video_id,
             "frame_number": i,
             "timestamp": round(i / fps, 2),
-            "frame_path": path,
+            "frame_path": _to_url_path(path, video_id),  # Store as relative URL
         })
 
     if not ids:
@@ -136,14 +161,21 @@ def index_transcripts(video_id: str, segments: list[dict]):
     logger.info(f"Indexed {len(ids)} transcript segments for video {video_id}")
 
 
-def search_images(query_embedding: list[float], n: int = 5, video_id: str = None) -> list[dict]:
+def search_images(query_embedding: list[float], n: int = 10, video_id: str = None) -> list[dict]:
     """Search image index by CLIP embedding similarity."""
     get_chroma_client()
+
+    # Fix 5: Don't query empty collections
+    count = _image_col.count()
+    if count == 0:
+        logger.warning("Image index is empty, nothing to search.")
+        return []
+
     where = {"video_id": video_id} if video_id else None
     try:
         results = _image_col.query(
             query_embeddings=[query_embedding],
-            n_results=min(n, _image_col.count() or 1),
+            n_results=min(n, count),
             where=where,
             include=["metadatas", "distances"]
         )
@@ -156,26 +188,34 @@ def search_images(query_embedding: list[float], n: int = 5, video_id: str = None
         for i, id_ in enumerate(results["ids"][0]):
             meta = results["metadatas"][0][i] if results["metadatas"] else {}
             dist = results["distances"][0][i] if results["distances"] else 0
+            vid = meta.get("video_id", "")
             hits.append({
                 "id": id_,
                 "score": round(1 - dist, 4),  # cosine distance to similarity
-                "video_id": meta.get("video_id", ""),
+                "video_id": vid,
                 "frame_number": meta.get("frame_number"),
                 "timestamp": meta.get("timestamp"),
-                "frame_path": meta.get("frame_path", ""),
+                "frame_path": _normalize_frame_path(meta.get("frame_path", ""), vid),
                 "source_index": "image",
             })
     return hits
 
 
-def search_captions(query_text: str, n: int = 5, video_id: str = None) -> list[dict]:
+def search_captions(query_text: str, n: int = 10, video_id: str = None) -> list[dict]:
     """Search caption index by text similarity."""
     get_chroma_client()
+
+    # Fix 5: Don't query empty collections
+    count = _caption_col.count()
+    if count == 0:
+        logger.warning("Caption index is empty, nothing to search.")
+        return []
+
     where = {"video_id": video_id} if video_id else None
     try:
         results = _caption_col.query(
             query_texts=[query_text],
-            n_results=min(n, _caption_col.count() or 1),
+            n_results=min(n, count),
             where=where,
             include=["metadatas", "documents", "distances"]
         )
@@ -189,27 +229,35 @@ def search_captions(query_text: str, n: int = 5, video_id: str = None) -> list[d
             meta = results["metadatas"][0][i] if results["metadatas"] else {}
             doc = results["documents"][0][i] if results["documents"] else ""
             dist = results["distances"][0][i] if results["distances"] else 0
+            vid = meta.get("video_id", "")
             hits.append({
                 "id": id_,
                 "score": round(1 - dist, 4) if dist < 2 else round(dist, 4),
-                "video_id": meta.get("video_id", ""),
+                "video_id": vid,
                 "frame_number": meta.get("frame_number"),
                 "timestamp": meta.get("timestamp"),
-                "frame_path": meta.get("frame_path", ""),
+                "frame_path": _normalize_frame_path(meta.get("frame_path", ""), vid),
                 "content": doc,
                 "source_index": "caption",
             })
     return hits
 
 
-def search_transcripts(query_text: str, n: int = 5, video_id: str = None) -> list[dict]:
+def search_transcripts(query_text: str, n: int = 10, video_id: str = None) -> list[dict]:
     """Search speech index by text similarity."""
     get_chroma_client()
+
+    # Fix 5: Don't query empty collections
+    count = _speech_col.count()
+    if count == 0:
+        logger.warning("Speech index is empty, nothing to search.")
+        return []
+
     where = {"video_id": video_id} if video_id else None
     try:
         results = _speech_col.query(
             query_texts=[query_text],
-            n_results=min(n, _speech_col.count() or 1),
+            n_results=min(n, count),
             where=where,
             include=["metadatas", "documents", "distances"]
         )

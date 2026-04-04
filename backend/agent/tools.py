@@ -8,7 +8,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "search_by_caption",
-            "description": "Search for video frames by their visual description/caption. Use this when the user asks about visual content, objects, scenes, or activities seen in the video. Returns matching frames with captions and timestamps.",
+            "description": "Search for video frames by their scene descriptions. Captions are short and generic (e.g., 'a man walking on a road'). Best for general scene/activity queries, NOT for identifying specific people or characters. Returns matching frames with captions and timestamps.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -22,8 +22,8 @@ TOOL_DEFINITIONS = [
                     },
                     "n": {
                         "type": "integer",
-                        "description": "Number of results to return (default: 5)",
-                        "default": 5
+                        "description": "Number of results to return (default: 10, use higher for exhaustive search)",
+                        "default": 10
                     }
                 },
                 "required": ["query"]
@@ -34,13 +34,13 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "search_by_visual_similarity",
-            "description": "Search for visually similar frames using CLIP image embeddings. Use this when you need to find frames that look similar to a text description based on visual features (colors, shapes, objects). More precise for visual matching than caption search.",
+            "description": "Search for visually similar frames using CLIP embeddings. BEST tool for finding specific people, characters, objects, logos, or visual appearances. More accurate than caption search for identifying WHO or WHAT is in a frame. ALWAYS use this for questions about specific people or characters.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Text description of the visual content to find"
+                        "description": "Detailed visual description of what to find (e.g., 'Captain America in his suit', 'a man in a blue uniform with a shield')"
                     },
                     "video_id": {
                         "type": "string",
@@ -48,8 +48,8 @@ TOOL_DEFINITIONS = [
                     },
                     "n": {
                         "type": "integer",
-                        "description": "Number of results to return (default: 5)",
-                        "default": 5
+                        "description": "Number of results to return (default: 10, use higher for exhaustive search)",
+                        "default": 10
                     }
                 },
                 "required": ["query"]
@@ -74,8 +74,8 @@ TOOL_DEFINITIONS = [
                     },
                     "n": {
                         "type": "integer",
-                        "description": "Number of results to return (default: 5)",
-                        "default": 5
+                        "description": "Number of results to return (default: 10)",
+                        "default": 10
                     }
                 },
                 "required": ["query"]
@@ -86,7 +86,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "search_by_image",
-            "description": "Search for frames visually similar to a reference image. Use this for image-to-video retrieval — when a user provides a reference image and wants to find similar-looking frames in the videos.",
+            "description": "Search for frames visually similar to a reference image. Use when a user provides a reference image and wants to find similar-looking frames.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -100,8 +100,8 @@ TOOL_DEFINITIONS = [
                     },
                     "n": {
                         "type": "integer",
-                        "description": "Number of results to return (default: 5)",
-                        "default": 5
+                        "description": "Number of results to return (default: 10)",
+                        "default": 10
                     }
                 },
                 "required": ["image_path"]

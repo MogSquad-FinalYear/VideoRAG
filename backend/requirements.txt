@@ -5,25 +5,25 @@ python-multipart==0.0.20
 python-dotenv==1.0.1
 
 # ML Models
-openai-whisper==20240930
-open-clip-torch==2.29.0
-transformers==4.47.1
-torch==2.5.1
-torchvision==0.20.1
-Pillow==11.0.0
-sentencepiece==0.2.0
+openai-whisper @ git+https://github.com/openai/whisper.git
+open-clip-torch>=2.29.0
+transformers>=4.47.1
+torch>=2.5.1
+torchvision>=0.20.1
+Pillow>=11.0.0
+sentencepiece>=0.2.0
 
 # Vector Database
-chromadb==0.5.23
+chromadb>=0.5.23
 
 # Video / Audio Processing
-opencv-python-headless==4.10.0.84
-imageio[ffmpeg]==2.36.1
-imageio-ffmpeg==0.5.1
+opencv-python-headless>=4.10.0.84
+imageio[ffmpeg]>=2.36.1
+imageio-ffmpeg>=0.5.1
 
 # LLM Client
-groq==0.13.0
+groq>=0.13.0
 
 # Utilities
-numpy==1.26.4
-aiofiles==24.1.0
+numpy>=1.26.4
+aiofiles>=24.1.0

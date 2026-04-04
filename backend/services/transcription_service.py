@@ -3,6 +3,7 @@ VideoRAG — Whisper Transcription Service
 Transcribes audio from videos with timestamps using OpenAI Whisper.
 """
 import logging
+import torch
 import whisper
 
 from backend.config import WHISPER_MODEL
@@ -10,16 +11,19 @@ from backend.config import WHISPER_MODEL
 logger = logging.getLogger(__name__)
 
 _whisper_model = None
+_device = "cpu"
 
 
 def load_whisper_model():
-    """Load the Whisper model once."""
-    global _whisper_model
+    """Load the Whisper model once, using GPU if available."""
+    global _whisper_model, _device
     if _whisper_model is not None:
         return
 
-    logger.info(f"Loading Whisper model '{WHISPER_MODEL}' on CPU...")
-    _whisper_model = whisper.load_model(WHISPER_MODEL, device="cpu")
+    # Fix 4: Auto-detect CUDA instead of hardcoding CPU
+    _device = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info(f"Loading Whisper model '{WHISPER_MODEL}' on {_device}...")
+    _whisper_model = whisper.load_model(WHISPER_MODEL, device=_device)
     logger.info("Whisper model loaded successfully.")
 
 
@@ -35,7 +39,7 @@ def transcribe_audio(audio_path: str) -> list[dict]:
         result = _whisper_model.transcribe(
             audio_path,
             language=None,  # auto-detect
-            fp16=False,     # CPU mode
+            fp16=(_device == "cuda"),  # Use fp16 on GPU, fp32 on CPU
             verbose=False
         )
 

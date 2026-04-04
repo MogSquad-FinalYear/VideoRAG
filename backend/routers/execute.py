@@ -1,15 +1,18 @@
 """
 VideoRAG — Execute Router
 POST /execute — Upload and process a video file.
+DELETE /videos/{video_id} — Delete a video and its indexed data.
 """
 import uuid
+import json
+import shutil
 import threading
 import logging
 from pathlib import Path
 
 from fastapi import APIRouter, UploadFile, File, HTTPException
 
-from backend.config import VIDEOS_DIR, FRAME_SAMPLE_FPS
+from backend.config import VIDEOS_DIR, FRAMES_DIR, AUDIO_DIR, METADATA_DIR, FRAME_SAMPLE_FPS
 from backend.models import ExecuteResponse
 from backend.services import video_processor, embedding_service, captioning_service, transcription_service, indexing_service
 
@@ -53,9 +56,10 @@ def _process_video(task_id: str, video_path: str, video_id: str):
         current += 1
 
         # Step 4: Generate CLIP embeddings
+        # Fix 8: embed_batch now returns (embeddings, valid_paths) — skip failed images
         _update_task(task_id, message=f"Generating visual embeddings for {len(frame_paths)} frames...", progress=current / total_steps)
-        embeddings = embedding_service.embed_batch(frame_paths)
-        indexing_service.index_frames(video_id, frame_paths, embeddings, fps=FRAME_SAMPLE_FPS)
+        embeddings, valid_frame_paths = embedding_service.embed_batch(frame_paths)
+        indexing_service.index_frames(video_id, valid_frame_paths, embeddings, fps=FRAME_SAMPLE_FPS)
         current += 1
 
         # Step 5: Generate BLIP captions
@@ -76,7 +80,7 @@ def _process_video(task_id: str, video_path: str, video_id: str):
         _update_task(
             task_id,
             status="completed",
-            message=f"Processing complete. {len(frame_paths)} frames, {len(captions)} captions indexed.",
+            message=f"Processing complete. {len(valid_frame_paths)} frames, {len(captions)} captions indexed.",
             progress=1.0,
             video_id=video_id,
         )
@@ -99,13 +103,19 @@ async def execute_upload(file: UploadFile = File(...)):
     video_id = str(uuid.uuid4())[:12]
     task_id = str(uuid.uuid4())[:12]
 
-    # Save video to disk
+    # Fix 9: Stream file to disk in chunks instead of loading entirely into RAM
     video_path = str(VIDEOS_DIR / f"{video_id}{ext}")
     try:
-        content = await file.read()
+        chunk_size = 1024 * 1024  # 1MB chunks
         with open(video_path, "wb") as f:
-            f.write(content)
+            while True:
+                chunk = await file.read(chunk_size)
+                if not chunk:
+                    break
+                f.write(chunk)
     except Exception as e:
+        # Clean up partial file
+        Path(video_path).unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=f"Failed to save video: {e}")
 
     # Initialize task state
@@ -122,3 +132,49 @@ async def execute_upload(file: UploadFile = File(...)):
     thread.start()
 
     return ExecuteResponse(task_id=task_id, status="processing", message="Video upload received. Processing started.")
+
+
+# Fix 14: Delete video endpoint
+@router.delete("/videos/{video_id}")
+async def delete_video(video_id: str):
+    """Delete a video and all its indexed data."""
+    deleted_items = []
+
+    # Delete from ChromaDB indexes
+    try:
+        indexing_service.delete_video_from_indexes(video_id)
+        deleted_items.append("indexes")
+    except Exception as e:
+        logger.error(f"Error deleting indexes for {video_id}: {e}")
+
+    # Delete video file (try all extensions)
+    for ext in ALLOWED_EXTENSIONS:
+        vpath = VIDEOS_DIR / f"{video_id}{ext}"
+        if vpath.exists():
+            vpath.unlink()
+            deleted_items.append("video_file")
+            break
+
+    # Delete frames directory
+    frames_dir = FRAMES_DIR / video_id
+    if frames_dir.exists():
+        shutil.rmtree(frames_dir)
+        deleted_items.append("frames")
+
+    # Delete audio file
+    audio_file = AUDIO_DIR / f"{video_id}.wav"
+    if audio_file.exists():
+        audio_file.unlink()
+        deleted_items.append("audio")
+
+    # Delete metadata
+    meta_file = METADATA_DIR / f"{video_id}.json"
+    if meta_file.exists():
+        meta_file.unlink()
+        deleted_items.append("metadata")
+
+    if not deleted_items:
+        raise HTTPException(status_code=404, detail=f"Video {video_id} not found.")
+
+    logger.info(f"Deleted video {video_id}: {deleted_items}")
+    return {"status": "deleted", "video_id": video_id, "deleted": deleted_items}

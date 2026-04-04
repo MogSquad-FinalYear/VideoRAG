@@ -66,6 +66,13 @@ export default function ChatWindow({ videoId, onClipClick }) {
     }
   };
 
+  // Fix 13: Clear chat
+  const handleClearChat = () => {
+    setMessages([]);
+    msgIdCounter = 0;
+    inputRef.current?.focus();
+  };
+
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -92,15 +99,31 @@ export default function ChatWindow({ videoId, onClipClick }) {
             )}
           </p>
         </div>
-        {videoId && (
-          <span className="chat__scope-badge">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <rect x="2" y="4" width="20" height="16" rx="2" />
-              <polygon points="10,8 10,16 16,12" />
-            </svg>
-            Scoped to video
-          </span>
-        )}
+        <div className="chat__header-actions">
+          {videoId && (
+            <span className="chat__scope-badge">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="2" y="4" width="20" height="16" rx="2" />
+                <polygon points="10,8 10,16 16,12" />
+              </svg>
+              Scoped to video
+            </span>
+          )}
+          {messages.length > 0 && (
+            <button
+              className="chat__clear-btn"
+              onClick={handleClearChat}
+              title="Clear conversation"
+              id="clear-chat-button"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+              </svg>
+              Clear
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Messages */}

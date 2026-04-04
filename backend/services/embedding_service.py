@@ -62,22 +62,32 @@ def embed_text(text: str) -> list[float]:
     return embedding.cpu().numpy().flatten().tolist()
 
 
-def embed_batch(image_paths: list[str], batch_size: int = 16) -> list[list[float]]:
-    """Generate CLIP embeddings for a batch of images."""
+def embed_batch(image_paths: list[str], batch_size: int = 16) -> tuple[list[list[float]], list[str]]:
+    """Generate CLIP embeddings for a batch of images.
+
+    Fix 8: Skip failed images entirely instead of creating zero tensor placeholders.
+    Returns (embeddings, valid_paths) — only successfully processed images.
+    """
     load_clip_model()
     all_embeddings = []
+    valid_paths = []
 
     for i in range(0, len(image_paths), batch_size):
         batch_paths = image_paths[i:i + batch_size]
         images = []
+        batch_valid_paths = []
+
         for p in batch_paths:
             try:
                 img = Image.open(p).convert("RGB")
                 images.append(_clip_preprocess(img))
+                batch_valid_paths.append(p)
             except Exception as e:
-                logger.warning(f"Failed to load image {p}: {e}")
-                # Use a zero tensor as placeholder
-                images.append(torch.zeros(3, 224, 224))
+                logger.warning(f"Failed to load image {p}, SKIPPING (not using zero tensor): {e}")
+                # Fix 8: Skip this image entirely — don't add a zero tensor
+
+        if not images:
+            continue
 
         batch_tensor = torch.stack(images).to(_device)
 
@@ -86,6 +96,7 @@ def embed_batch(image_paths: list[str], batch_size: int = 16) -> list[list[float
             embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
 
         all_embeddings.extend(embeddings.cpu().numpy().tolist())
+        valid_paths.extend(batch_valid_paths)
         logger.info(f"Embedded batch {i // batch_size + 1}, total: {len(all_embeddings)}/{len(image_paths)}")
 
-    return all_embeddings
+    return all_embeddings, valid_paths

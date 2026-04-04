@@ -32,6 +32,7 @@ function App() {
           refreshKey={refreshKey}
           collapsed={sidebarCollapsed}
           onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
+          onDeleteVideo={() => setRefreshKey((k) => k + 1)}
         />
       </aside>
 

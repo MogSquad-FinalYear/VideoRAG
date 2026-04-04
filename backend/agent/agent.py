@@ -12,25 +12,47 @@ from backend.services import indexing_service, embedding_service
 
 logger = logging.getLogger(__name__)
 
+# ── Singleton Groq client (Fix 7) ────────────────────────────────────────────
+_groq_client = None
+
+
+def _get_groq_client() -> Groq:
+    """Return a singleton Groq client instance."""
+    global _groq_client
+    if _groq_client is None:
+        if not GROQ_API_KEY:
+            raise ValueError(
+                "GROQ_API_KEY is not set. Please add it to your .env file. "
+                "Get a free key at https://console.groq.com"
+            )
+        _groq_client = Groq(api_key=GROQ_API_KEY)
+        logger.info("Groq client initialized.")
+    return _groq_client
+
+
+# ── System Prompt (Fix 16) ───────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are **Kubrick**, a forensic video analysis AI assistant. You help investigators search and analyze evidence videos.
 
 You have access to a multimodal video retrieval system with 3 indexes:
-1. **Caption Index** — Scene descriptions generated from video frames (BLIP captions)
-2. **Image Index** — Visual embeddings of frames (CLIP vectors) for visual similarity search
-3. **Speech Index** — Transcribed audio/speech from videos (Whisper)
+1. **Caption Index** — Short scene descriptions of each frame (can be generic/inaccurate)
+2. **Image Index** — CLIP visual embeddings of each frame (best for finding specific people, objects, appearances)
+3. **Speech Index** — Transcribed speech/dialogue from the video
 
-When answering queries:
-- Use `search_by_caption` for questions about what is SEEN in the video (objects, people, scenes, actions)
-- Use `search_by_visual_similarity` for precise visual matching (colors, specific objects, appearances)
-- Use `search_transcripts` for questions about what was SAID or SPOKEN in the video
-- Use `search_by_image` when the user provides a reference image to find similar frames
-- Use `get_video_clip_info` to get details about a specific time range
-- You can call MULTIPLE tools to cross-reference visual and audio evidence
-- Always mention timestamps when reporting findings
-- Be precise and factual — this is forensic evidence analysis
-- If results are inconclusive, say so honestly
+## Query Strategy — FOLLOW STRICTLY
+- For questions about **specific people, characters, or visual appearances**: Use `search_by_visual_similarity` as PRIMARY. The caption index has generic descriptions that often miss specific identities.
+- For questions about **general scenes or activities**: Use `search_by_caption`.
+- For questions about **spoken words or dialogue**: Use `search_transcripts`.
+- **ALWAYS call at least 2 different search tools** for any question about video content. Cross-reference results from visual similarity AND captions for the most accurate answer.
 
-Format your responses clearly with timestamps like [00:15 - 00:23] when referencing specific moments."""
+## CRITICAL RULES
+1. You MUST call search tools before answering. NEVER answer from assumptions.
+2. ALWAYS use `search_by_visual_similarity` when the question is about a person, character, or specific object.
+3. For every search, set n=10 or higher to find ALL occurrences.
+4. **Only report frames where you are confident about the match.** If the caption or visual match seems generic or unrelated, EXCLUDE it. Quality over quantity.
+5. Report ALL matching timestamps as [MM:SS] format.
+6. Each frame is sampled at 1fps, so frame_number N = timestamp N seconds.
+7. When results from different tools disagree, prefer the visual similarity results for appearance questions.
+8. Group consecutive matching timestamps into ranges (e.g., [00:11] to [00:15]) instead of listing each second."""
 
 
 def _execute_tool(tool_name: str, args: dict) -> str:
@@ -39,7 +61,7 @@ def _execute_tool(tool_name: str, args: dict) -> str:
         if tool_name == "search_by_caption":
             results = indexing_service.search_captions(
                 query_text=args["query"],
-                n=args.get("n", 5),
+                n=args.get("n", 10),
                 video_id=args.get("video_id"),
             )
             return json.dumps(results, indent=2)
@@ -48,7 +70,7 @@ def _execute_tool(tool_name: str, args: dict) -> str:
             text_embedding = embedding_service.embed_text(args["query"])
             results = indexing_service.search_images(
                 query_embedding=text_embedding,
-                n=args.get("n", 5),
+                n=args.get("n", 10),
                 video_id=args.get("video_id"),
             )
             return json.dumps(results, indent=2)
@@ -56,7 +78,7 @@ def _execute_tool(tool_name: str, args: dict) -> str:
         elif tool_name == "search_transcripts":
             results = indexing_service.search_transcripts(
                 query_text=args["query"],
-                n=args.get("n", 5),
+                n=args.get("n", 10),
                 video_id=args.get("video_id"),
             )
             return json.dumps(results, indent=2)
@@ -65,7 +87,7 @@ def _execute_tool(tool_name: str, args: dict) -> str:
             image_embedding = embedding_service.embed_image(args["image_path"])
             results = indexing_service.search_images(
                 query_embedding=image_embedding,
-                n=args.get("n", 5),
+                n=args.get("n", 10),
                 video_id=args.get("video_id"),
             )
             return json.dumps(results, indent=2)
@@ -111,7 +133,7 @@ def run_agent(query: str, video_id: str = None, image_path: str = None, conversa
     2. If tool_calls → execute → send results back
     3. Return final answer with sources
     """
-    client = Groq(api_key=GROQ_API_KEY)
+    client = _get_groq_client()
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
@@ -138,26 +160,79 @@ def run_agent(query: str, video_id: str = None, image_path: str = None, conversa
                 tools=TOOL_DEFINITIONS,
                 tool_choice="auto",
                 temperature=0.1,
-                max_tokens=2048,
+                max_tokens=4096,
             )
         except Exception as e:
-            logger.error(f"Groq API error: {e}")
+            error_str = str(e)
+            logger.error(f"Groq API error: {error_str}")
+
+            # Handle tool_use_failed — extract the failed_generation text
+            if "tool_use_failed" in error_str or "failed_generation" in error_str:
+                # Try to extract the actual generated text from the error
+                try:
+                    # Parse the error to find the failed_generation
+                    import re
+                    match = re.search(r"'failed_generation':\s*'(.+?)'}", error_str)
+                    if match:
+                        generated_text = match.group(1)
+                        logger.info(f"Recovered failed_generation: {generated_text[:100]}...")
+                        return {
+                            "answer": generated_text,
+                            "clips": _build_clips(all_sources),
+                            "sources": all_sources[:20],
+                        }
+                except Exception:
+                    pass
+
+                # If we can't parse it, retry without tools
+                try:
+                    logger.info("Retrying without tools after tool_use_failed...")
+                    fallback_response = client.chat.completions.create(
+                        model=GROQ_MODEL,
+                        messages=messages,
+                        temperature=0.1,
+                        max_tokens=4096,
+                    )
+                    answer = fallback_response.choices[0].message.content or "Could not generate a response."
+                    return {
+                        "answer": answer,
+                        "clips": _build_clips(all_sources),
+                        "sources": all_sources[:20],
+                    }
+                except Exception as fallback_err:
+                    logger.error(f"Fallback also failed: {fallback_err}")
+
             return {
-                "answer": f"I encountered an error communicating with the AI service: {str(e)}",
+                "answer": f"I encountered an error communicating with the AI service: {error_str}",
                 "clips": [],
                 "sources": [],
             }
 
         choice = response.choices[0]
 
-        # If the model wants to call tools
-        if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
+        # Fix 2: Check for tool_calls by looking at the message object directly,
+        # not just finish_reason (Groq can return tool_calls with finish_reason="stop")
+        has_tool_calls = (
+            choice.message.tool_calls is not None
+            and len(choice.message.tool_calls) > 0
+        )
+
+        if has_tool_calls:
             # Add assistant message with tool calls
             messages.append(choice.message)
 
             for tool_call in choice.message.tool_calls:
                 fn_name = tool_call.function.name
-                fn_args = json.loads(tool_call.function.arguments)
+                try:
+                    fn_args = json.loads(tool_call.function.arguments)
+                except json.JSONDecodeError:
+                    logger.error(f"Failed to parse tool args: {tool_call.function.arguments}")
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps({"error": "Invalid tool arguments"}),
+                    })
+                    continue
 
                 # Override video_id if user scoped to a specific video
                 if video_id and "video_id" not in fn_args:
@@ -171,7 +246,7 @@ def run_agent(query: str, video_id: str = None, image_path: str = None, conversa
                     parsed = json.loads(result)
                     if isinstance(parsed, list):
                         all_sources.extend(parsed)
-                except:
+                except Exception:
                     pass
 
                 messages.append({
@@ -185,28 +260,10 @@ def run_agent(query: str, video_id: str = None, image_path: str = None, conversa
         # Model is done — return final answer
         answer = choice.message.content or "I couldn't generate a response."
 
-        # Build clips from sources
-        clips = []
-        seen_clips = set()
-        for src in all_sources:
-            vid = src.get("video_id", "")
-            ts = src.get("timestamp") or src.get("start_time")
-            if vid and ts is not None:
-                clip_key = f"{vid}_{ts}"
-                if clip_key not in seen_clips:
-                    seen_clips.add(clip_key)
-                    clips.append({
-                        "video_id": vid,
-                        "start_time": float(ts),
-                        "end_time": float(src.get("end_time", ts + 2)),
-                        "frame_paths": [src.get("frame_path", "")] if src.get("frame_path") else [],
-                        "description": src.get("content", ""),
-                    })
-
         return {
             "answer": answer,
-            "clips": clips[:10],  # limit to 10 clips
-            "sources": all_sources[:20],  # limit sources
+            "clips": _build_clips(all_sources),
+            "sources": all_sources[:20],
         }
 
     # If we exhausted iterations
@@ -215,3 +272,24 @@ def run_agent(query: str, video_id: str = None, image_path: str = None, conversa
         "clips": [],
         "sources": all_sources,
     }
+
+
+def _build_clips(all_sources: list) -> list:
+    """Build deduplicated clip list from search sources."""
+    clips = []
+    seen_clips = set()
+    for src in all_sources:
+        vid = src.get("video_id", "")
+        ts = src.get("timestamp") or src.get("start_time")
+        if vid and ts is not None:
+            clip_key = f"{vid}_{ts}"
+            if clip_key not in seen_clips:
+                seen_clips.add(clip_key)
+                clips.append({
+                    "video_id": vid,
+                    "start_time": float(ts),
+                    "end_time": float(src.get("end_time", ts + 2)),
+                    "frame_paths": [src.get("frame_path", "")] if src.get("frame_path") else [],
+                    "description": src.get("content", ""),
+                })
+    return clips[:20]  # increased from 10 to 20

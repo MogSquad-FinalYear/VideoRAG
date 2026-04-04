@@ -109,6 +109,19 @@ export async function getHealth() {
 }
 
 /**
+ * Delete a video and all its indexed data.
+ * @param {string} videoId
+ * @returns {Promise<{status, video_id, deleted}>}
+ */
+export async function deleteVideo(videoId) {
+  const res = await fetch(`${API_BASE}/videos/${videoId}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error(`Delete failed: ${res.statusText}`);
+  return res.json();
+}
+
+/**
  * Poll task status until completion or failure.
  * @param {string} taskId
  * @param {function} onUpdate - called with each status update

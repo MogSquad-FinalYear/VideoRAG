@@ -2,7 +2,7 @@
  * Sidebar — Video library, upload button, and chat history.
  */
 import { useState, useEffect } from 'react';
-import { getVideos } from '../api/client';
+import { getVideos, deleteVideo } from '../api/client';
 import StatusBadge from './StatusBadge';
 import './Sidebar.css';
 
@@ -13,9 +13,29 @@ export default function Sidebar({
   refreshKey,
   collapsed,
   onToggleCollapse,
+  onDeleteVideo,
 }) {
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [deleting, setDeleting] = useState(null);
+
+  const handleDelete = async (e, videoId) => {
+    e.stopPropagation(); // Don't select the video
+    if (!confirm('Delete this video and all its indexed data?')) return;
+    setDeleting(videoId);
+    try {
+      await deleteVideo(videoId);
+      if (selectedVideoId === videoId) {
+        onSelectVideo(null);
+      }
+      onDeleteVideo?.(); // Trigger refresh
+    } catch (err) {
+      console.error('Failed to delete video:', err);
+      alert('Failed to delete video. Is the backend running?');
+    } finally {
+      setDeleting(null);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -160,6 +180,14 @@ export default function Sidebar({
                   </div>
                 </div>
                 <StatusBadge status={video.status} />
+                <button
+                  className="sidebar__video-delete"
+                  onClick={(e) => handleDelete(e, video.video_id)}
+                  disabled={deleting === video.video_id}
+                  title="Delete video"
+                >
+                  {deleting === video.video_id ? '...' : '✕'}
+                </button>
               </button>
             ))
           )}
