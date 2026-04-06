@@ -6,10 +6,23 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(ROOT_DIR / ".env")
+
+
+def _load_environment() -> None:
+    """Load environment variables from the most likely .env locations."""
+    for env_path in (
+        ROOT_DIR / ".env",
+        ROOT_DIR / "backend" / ".env",
+        Path.cwd() / ".env",
+    ):
+        if env_path.exists():
+            load_dotenv(env_path, override=True, encoding="utf-8-sig")
+
+
+_load_environment()
 
 # API Keys
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 
 # Data paths
 DATA_DIR = ROOT_DIR / "data"
@@ -30,15 +43,25 @@ BLIP_MODEL = os.getenv("BLIP_MODEL", "Salesforce/blip-image-captioning-base")
 
 # Processing
 FRAME_SAMPLE_FPS = float(os.getenv("FRAME_SAMPLE_FPS", "1"))
+MAX_FRAMES_PER_VIDEO = int(os.getenv("MAX_FRAMES_PER_VIDEO", "48"))
+CAPTION_STRIDE = int(os.getenv("CAPTION_STRIDE", "3"))
+CAPTION_MAX_FRAMES = int(os.getenv("CAPTION_MAX_FRAMES", "24"))
+CAPTION_MODE = os.getenv("CAPTION_MODE", "async").strip().lower()
+if CAPTION_MODE not in {"sync", "async", "off"}:
+    CAPTION_MODE = "async"
+CAPTION_BACKEND = os.getenv("CAPTION_BACKEND", "clip").strip().lower()
+if CAPTION_BACKEND not in {"clip", "blip"}:
+    CAPTION_BACKEND = "clip"
 
 # Groq
 GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+ENABLE_LLM_POLISH = os.getenv("ENABLE_LLM_POLISH", "false").strip().lower() == "true"
 
 # Server
 BACKEND_PORT = int(os.getenv("BACKEND_PORT", "8000"))
 FRONTEND_PORT = int(os.getenv("FRONTEND_PORT", "5173"))
 
 # ChromaDB collections
-IMAGE_COLLECTION = "image_index"
-CAPTION_COLLECTION = "caption_index"
-SPEECH_COLLECTION = "speech_index"
+IMAGE_COLLECTION = os.getenv("IMAGE_COLLECTION", "image_index")
+CAPTION_COLLECTION = os.getenv("CAPTION_COLLECTION", "caption_index_clip")
+SPEECH_COLLECTION = os.getenv("SPEECH_COLLECTION", "speech_index_clip")

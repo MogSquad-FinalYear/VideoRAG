@@ -2,7 +2,7 @@
  * ChatWindow — Main chat interface with message input and history.
  */
 import { useState, useRef, useEffect } from 'react';
-import { sendMessage } from '../api/client';
+import { sendMessage, sendMessageWithImage } from '../api/client';
 import MessageBubble from './MessageBubble';
 import './ChatWindow.css';
 
@@ -12,8 +12,10 @@ export default function ChatWindow({ videoId, onClipClick }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [referenceImage, setReferenceImage] = useState(null);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
+  const imageInputRef = useRef(null);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -40,7 +42,9 @@ export default function ChatWindow({ videoId, onClipClick }) {
     setLoading(true);
 
     try {
-      const result = await sendMessage(query, videoId);
+      const result = referenceImage
+        ? await sendMessageWithImage(query, referenceImage, videoId)
+        : await sendMessage(query, videoId);
 
       const aiMsg = {
         id: `msg-${++msgIdCounter}`,
@@ -51,6 +55,7 @@ export default function ChatWindow({ videoId, onClipClick }) {
       };
 
       setMessages((prev) => [...prev, aiMsg]);
+      setReferenceImage(null);
     } catch (err) {
       const errorMsg = {
         id: `msg-${++msgIdCounter}`,
@@ -183,7 +188,41 @@ export default function ChatWindow({ videoId, onClipClick }) {
 
       {/* Input */}
       <div className="chat__input-area">
+        {referenceImage && (
+          <div className="chat__reference-image">
+            <span className="chat__reference-image-label">Image Reference: {referenceImage.name}</span>
+            <button
+              className="chat__reference-image-remove"
+              onClick={() => setReferenceImage(null)}
+              title="Remove reference image"
+            >
+              Remove
+            </button>
+          </div>
+        )}
         <div className="chat__input-wrapper">
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept="image/*"
+            hidden
+            onChange={(e) => {
+              const file = e.target.files?.[0] || null;
+              setReferenceImage(file);
+            }}
+          />
+          <button
+            className="chat__attach-btn"
+            onClick={() => imageInputRef.current?.click()}
+            title="Attach reference image"
+            disabled={loading}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+              <circle cx="8.5" cy="8.5" r="1.5" />
+              <polyline points="21 15 16 10 5 21" />
+            </svg>
+          </button>
           <textarea
             ref={inputRef}
             className="chat__input"
@@ -209,7 +248,7 @@ export default function ChatWindow({ videoId, onClipClick }) {
           </button>
         </div>
         <p className="chat__input-hint">
-          Press <kbd>Enter</kbd> to send · <kbd>Shift+Enter</kbd> for new line
+          Press <kbd>Enter</kbd> to send · <kbd>Shift+Enter</kbd> for new line · attach image for visual search
         </p>
       </div>
     </div>

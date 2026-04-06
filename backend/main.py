@@ -36,7 +36,7 @@ app.mount("/frames", StaticFiles(directory=str(FRAMES_DIR)), name="frames")
 
 # Also serve uploaded videos
 videos_dir = DATA_DIR / "videos"
-app.mount("/videos", StaticFiles(directory=str(videos_dir)), name="videos")
+app.mount("/video-files", StaticFiles(directory=str(videos_dir)), name="video-files")
 
 # Register routers
 from backend.routers import execute, status, chat, videos

@@ -3,17 +3,30 @@ VideoRAG — BLIP Captioning Service
 Generates natural language captions for video frames.
 """
 import logging
+import numpy as np
 import torch
 from PIL import Image
 from transformers import BlipProcessor, BlipForConditionalGeneration
 
-from backend.config import BLIP_MODEL
+from backend.config import BLIP_MODEL, CAPTION_BACKEND
+from backend.services import embedding_service
 
 logger = logging.getLogger(__name__)
 
 _blip_model = None
 _blip_processor = None
 _device = "cpu"
+_label_embeddings = None
+
+_LABELS = [
+    "person", "man", "woman", "group of people", "face closeup", "crowd",
+    "car", "truck", "motorcycle", "bus", "street", "parking lot",
+    "building", "office", "room", "corridor", "door", "window",
+    "table", "chair", "bag", "backpack", "phone", "laptop",
+    "sports field", "basketball court", "stadium", "scoreboard",
+    "outdoor daylight", "outdoor night", "indoor scene", "camera close shot",
+    "walking", "running", "talking", "holding object", "sitting", "standing",
+]
 
 
 def load_blip_model():
@@ -46,9 +59,9 @@ def caption_frame(image_path: str) -> str:
         with torch.no_grad():
             output = _blip_model.generate(
                 **inputs,
-                max_new_tokens=75,
-                num_beams=3,         # Beam search for better quality
-                repetition_penalty=1.5,  # Avoid repetitive captions
+                max_new_tokens=40,
+                num_beams=1,
+                repetition_penalty=1.2,
             )
 
         caption = _blip_processor.decode(output[0], skip_special_tokens=True)
@@ -58,12 +71,56 @@ def caption_frame(image_path: str) -> str:
         return ""
 
 
+def _load_label_embeddings() -> np.ndarray:
+    """Build CLIP text embeddings for a fixed, lightweight label vocabulary."""
+    global _label_embeddings
+    if _label_embeddings is None:
+        _label_embeddings = np.array(
+            [embedding_service.embed_text(label) for label in _LABELS],
+            dtype=np.float32,
+        )
+    return _label_embeddings
+
+
+def _caption_batch_clip(image_paths: list[str]) -> list[str]:
+    """Generate fast pseudo-captions by matching frame embeddings to label prompts."""
+    if not image_paths:
+        return []
+
+    label_emb = _load_label_embeddings()
+    img_emb, valid_paths = embedding_service.embed_batch(image_paths, batch_size=24)
+    if not img_emb:
+        return ["" for _ in image_paths]
+
+    path_to_caption = {}
+    for emb, path in zip(img_emb, valid_paths):
+        vec = np.array(emb, dtype=np.float32)
+        sims = label_emb @ vec
+        top_idx = np.argsort(sims)[-2:][::-1]
+        top_labels = [_LABELS[i] for i in top_idx if sims[i] > 0.19]
+
+        if len(top_labels) >= 2:
+            caption = f"scene with {top_labels[0]} and {top_labels[1]}"
+        elif len(top_labels) == 1:
+            caption = f"scene with {top_labels[0]}"
+        else:
+            caption = "scene in video"
+
+        path_to_caption[path] = caption
+
+    captions = [path_to_caption.get(p, "") for p in image_paths]
+    return captions
+
+
 def caption_batch(image_paths: list[str], batch_size: int = 8) -> list[str]:
     """Generate captions for a batch of frames using TRUE batching.
 
     Fix 3: Process images in proper batches through the model,
     instead of calling caption_frame() one at a time.
     """
+    if CAPTION_BACKEND == "clip":
+        return _caption_batch_clip(image_paths)
+
     load_blip_model()
     all_captions = []
 
@@ -98,9 +155,9 @@ def caption_batch(image_paths: list[str], batch_size: int = 8) -> list[str]:
             with torch.no_grad():
                 outputs = _blip_model.generate(
                     **inputs,
-                    max_new_tokens=75,
-                    num_beams=3,
-                    repetition_penalty=1.5,
+                    max_new_tokens=40,
+                    num_beams=1,
+                    repetition_penalty=1.2,
                 )
 
             captions = _blip_processor.batch_decode(outputs, skip_special_tokens=True)

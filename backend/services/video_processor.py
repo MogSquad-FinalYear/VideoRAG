@@ -4,6 +4,7 @@ Frame extraction via OpenCV, audio extraction via imageio-ffmpeg (no system FFmp
 """
 import cv2
 import json
+import math
 import subprocess
 import logging
 from pathlib import Path
@@ -23,7 +24,7 @@ def get_ffmpeg_binary() -> str:
         raise RuntimeError("imageio-ffmpeg not installed. Run: pip install imageio-ffmpeg")
 
 
-def extract_frames(video_path: str, video_id: str, fps: float = None) -> list[str]:
+def extract_frames(video_path: str, video_id: str, fps: float = None, max_frames: int | None = None) -> list[str]:
     """
     Extract frames from video at the configured FPS rate using OpenCV.
     Returns list of saved frame file paths.
@@ -42,7 +43,13 @@ def extract_frames(video_path: str, video_id: str, fps: float = None) -> list[st
     if video_fps <= 0:
         video_fps = 30.0
 
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
     frame_interval = max(1, int(video_fps / fps))
+    if max_frames and max_frames > 0 and total_frames > 0:
+        # Enforce a hard cap so long videos do not explode processing time.
+        capped_interval = max(1, math.ceil(total_frames / max_frames))
+        frame_interval = max(frame_interval, capped_interval)
     frame_paths = []
     frame_idx = 0
     saved_count = 0
@@ -60,7 +67,13 @@ def extract_frames(video_path: str, video_id: str, fps: float = None) -> list[st
         frame_idx += 1
 
     cap.release()
-    logger.info(f"Extracted {saved_count} frames from {video_path}")
+    logger.info(
+        "Extracted %s frames from %s (interval=%s, total_frames=%s)",
+        saved_count,
+        video_path,
+        frame_interval,
+        total_frames,
+    )
     return frame_paths
 
 

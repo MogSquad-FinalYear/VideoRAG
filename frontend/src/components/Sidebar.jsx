@@ -153,10 +153,18 @@ export default function Sidebar({
             </div>
           ) : (
             videos.map((video) => (
-              <button
+              <div
                 key={video.video_id}
                 className={`sidebar__video-item ${selectedVideoId === video.video_id ? 'sidebar__video-item--active' : ''}`}
                 onClick={() => onSelectVideo(video.video_id)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    onSelectVideo(video.video_id);
+                  }
+                }}
                 id={`video-${video.video_id}`}
               >
                 <div className="sidebar__video-thumb">
@@ -188,7 +196,7 @@ export default function Sidebar({
                 >
                   {deleting === video.video_id ? '...' : '✕'}
                 </button>
-              </button>
+              </div>
             ))
           )}
         </div>

@@ -4,7 +4,6 @@ POST /execute — Upload and process a video file.
 DELETE /videos/{video_id} — Delete a video and its indexed data.
 """
 import uuid
-import json
 import shutil
 import threading
 import logging
@@ -12,7 +11,17 @@ from pathlib import Path
 
 from fastapi import APIRouter, UploadFile, File, HTTPException
 
-from backend.config import VIDEOS_DIR, FRAMES_DIR, AUDIO_DIR, METADATA_DIR, FRAME_SAMPLE_FPS
+from backend.config import (
+    VIDEOS_DIR,
+    FRAMES_DIR,
+    AUDIO_DIR,
+    METADATA_DIR,
+    FRAME_SAMPLE_FPS,
+    MAX_FRAMES_PER_VIDEO,
+    CAPTION_STRIDE,
+    CAPTION_MAX_FRAMES,
+    CAPTION_MODE,
+)
 from backend.models import ExecuteResponse
 from backend.services import video_processor, embedding_service, captioning_service, transcription_service, indexing_service
 
@@ -31,10 +40,47 @@ def _update_task(task_id: str, **kwargs):
         tasks[task_id].update(kwargs)
 
 
+def _select_caption_frames(frame_paths: list[str]) -> list[str]:
+    """Select a sparse subset of frames for caption indexing."""
+    caption_step = max(1, CAPTION_STRIDE)
+    selected = frame_paths[::caption_step]
+    if CAPTION_MAX_FRAMES > 0 and len(selected) > CAPTION_MAX_FRAMES:
+        downsample_step = max(1, len(selected) // CAPTION_MAX_FRAMES)
+        selected = selected[::downsample_step]
+    return selected
+
+
+def _generate_captions(video_id: str, frame_paths: list[str], valid_frame_paths: list[str]) -> int:
+    """Generate and index captions for selected key frames only."""
+    try:
+        caption_frame_paths = _select_caption_frames(frame_paths)
+        if not caption_frame_paths:
+            return 0
+
+        logger.info(
+            "Generating captions for %s key frames (from %s total) for video %s",
+            len(caption_frame_paths),
+            len(frame_paths),
+            video_id,
+        )
+        captions = captioning_service.caption_batch(caption_frame_paths)
+        caption_map = {
+            path: caption
+            for path, caption in zip(caption_frame_paths, captions)
+            if caption
+        }
+        aligned_captions = [caption_map.get(path, "") for path in valid_frame_paths]
+        indexing_service.index_captions(video_id, valid_frame_paths, aligned_captions, fps=FRAME_SAMPLE_FPS)
+        return sum(1 for c in aligned_captions if c)
+    except Exception as e:
+        logger.exception("Caption generation failed for video %s: %s", video_id, e)
+        return 0
+
+
 def _process_video(task_id: str, video_path: str, video_id: str):
     """Full video processing pipeline — runs in background thread."""
     try:
-        total_steps = 6
+        total_steps = 5 if CAPTION_MODE == "sync" else 4
         current = 0
 
         # Step 1: Extract metadata
@@ -44,7 +90,12 @@ def _process_video(task_id: str, video_path: str, video_id: str):
 
         # Step 2: Extract frames
         _update_task(task_id, message="Extracting frames from video...", progress=current / total_steps)
-        frame_paths = video_processor.extract_frames(video_path, video_id, fps=FRAME_SAMPLE_FPS)
+        frame_paths = video_processor.extract_frames(
+            video_path,
+            video_id,
+            fps=FRAME_SAMPLE_FPS,
+            max_frames=MAX_FRAMES_PER_VIDEO,
+        )
         if not frame_paths:
             _update_task(task_id, status="failed", message="No frames extracted from video.", progress=1.0)
             return
@@ -62,13 +113,18 @@ def _process_video(task_id: str, video_path: str, video_id: str):
         indexing_service.index_frames(video_id, valid_frame_paths, embeddings, fps=FRAME_SAMPLE_FPS)
         current += 1
 
-        # Step 5: Generate BLIP captions
-        _update_task(task_id, message=f"Generating captions for {len(frame_paths)} frames...", progress=current / total_steps)
-        captions = captioning_service.caption_batch(frame_paths)
-        indexing_service.index_captions(video_id, frame_paths, captions, fps=FRAME_SAMPLE_FPS)
-        current += 1
+        caption_count = 0
+        if CAPTION_MODE == "sync":
+            caption_count = _generate_captions(video_id, frame_paths, valid_frame_paths)
+            current += 1
+        elif CAPTION_MODE == "async":
+            threading.Thread(
+                target=_generate_captions,
+                args=(video_id, frame_paths, valid_frame_paths),
+                daemon=True,
+            ).start()
 
-        # Step 6: Transcribe audio
+        # Step 5 (or 4): Transcribe audio
         if audio_path:
             _update_task(task_id, message="Transcribing audio...", progress=current / total_steps)
             segments = transcription_service.transcribe_audio(audio_path)
@@ -77,10 +133,17 @@ def _process_video(task_id: str, video_path: str, video_id: str):
             _update_task(task_id, message="No audio track found, skipping transcription.", progress=current / total_steps)
         current += 1
 
+        if CAPTION_MODE == "off":
+            caption_state = "captions disabled"
+        elif CAPTION_MODE == "async":
+            caption_state = "captions indexing in background"
+        else:
+            caption_state = f"{caption_count} captions indexed"
+
         _update_task(
             task_id,
             status="completed",
-            message=f"Processing complete. {len(valid_frame_paths)} frames, {len(captions)} captions indexed.",
+            message=f"Processing complete. {len(valid_frame_paths)} frames, {caption_state}.",
             progress=1.0,
             video_id=video_id,
         )

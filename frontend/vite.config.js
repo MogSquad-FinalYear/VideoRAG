@@ -6,12 +6,13 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/execute': 'http://localhost:8000',
-      '/status': 'http://localhost:8000',
-      '/chat': 'http://localhost:8000',
-      '/videos': 'http://localhost:8000',
-      '/frames': 'http://localhost:8000',
-      '/health': 'http://localhost:8000',
+      '/execute': 'http://localhost:8002',
+      '/status': 'http://localhost:8002',
+      '/chat': 'http://localhost:8002',
+      '/videos': 'http://localhost:8002',
+      '/video-files': 'http://localhost:8002',
+      '/frames': 'http://localhost:8002',
+      '/health': 'http://localhost:8002',
     }
   }
 })

@@ -6,7 +6,7 @@ import json
 import logging
 from groq import Groq
 
-from backend.config import GROQ_API_KEY, GROQ_MODEL, FRAMES_DIR
+from backend.config import GROQ_API_KEY, GROQ_MODEL, FRAMES_DIR, ENABLE_LLM_POLISH
 from backend.agent.tools import TOOL_DEFINITIONS
 from backend.services import indexing_service, embedding_service
 
@@ -126,6 +126,180 @@ def _execute_tool(tool_name: str, args: dict) -> str:
         return json.dumps({"error": str(e)})
 
 
+def _build_local_answer(query: str, video_id: str = None, image_path: str = None) -> dict:
+    """Fallback retrieval path when the LLM is unavailable."""
+    query_lower = query.lower()
+    sources = []
+
+    if image_path:
+        sources.extend(json.loads(_execute_tool("search_by_image", {
+            "image_path": image_path,
+            "video_id": video_id,
+            "n": 10,
+        })))
+
+    if any(keyword in query_lower for keyword in ["said", "say", "spoken", "tell", "audio", "voice", "witness", "mention", "mentioned"]):
+        sources.extend(json.loads(_execute_tool("search_transcripts", {
+            "query": query,
+            "video_id": video_id,
+            "n": 10,
+        })))
+    elif any(keyword in query_lower for keyword in ["person", "man", "woman", "car", "vehicle", "object", "bag", "weapon", "blue", "red", "green", "shirt", "jacket", "face"]):
+        sources.extend(json.loads(_execute_tool("search_by_visual_similarity", {
+            "query": query,
+            "video_id": video_id,
+            "n": 10,
+        })))
+        sources.extend(json.loads(_execute_tool("search_by_caption", {
+            "query": query,
+            "video_id": video_id,
+            "n": 10,
+        })))
+    else:
+        sources.extend(json.loads(_execute_tool("search_by_caption", {
+            "query": query,
+            "video_id": video_id,
+            "n": 10,
+        })))
+        sources.extend(json.loads(_execute_tool("search_by_visual_similarity", {
+            "query": query,
+            "video_id": video_id,
+            "n": 10,
+        })))
+
+    deduped = []
+    seen = set()
+    for src in sources:
+        key = (
+            src.get("video_id"),
+            src.get("frame_number"),
+            src.get("timestamp"),
+            src.get("start_time"),
+            src.get("end_time"),
+            src.get("content"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(src)
+
+    top_hits = deduped[:5]
+    if not top_hits:
+        return {
+            "answer": "I could not find matching evidence in the current indexes.",
+            "clips": [],
+            "sources": [],
+        }
+
+    summary_lines = ["I found the following relevant evidence:"]
+    for hit in top_hits:
+        timestamp = hit.get("timestamp")
+        start_time = hit.get("start_time")
+        end_time = hit.get("end_time")
+        if timestamp is not None:
+            summary_lines.append(f"- {hit.get('video_id')} at {timestamp:.0f}s")
+        elif start_time is not None and end_time is not None:
+            summary_lines.append(f"- {hit.get('video_id')} from {start_time:.0f}s to {end_time:.0f}s")
+        else:
+            summary_lines.append(f"- {hit.get('video_id')}")
+
+    return {
+        "answer": "\n".join(summary_lines),
+        "clips": _build_clips(deduped),
+        "sources": deduped[:20],
+    }
+
+
+def _is_speech_query(query: str) -> bool:
+    q = query.lower()
+    speech_terms = [
+        "said", "say", "spoken", "speech", "audio", "voice", "transcript",
+        "when did", "quote", "mention", "witness", "told", "heard",
+    ]
+    return any(term in q for term in speech_terms)
+
+
+def _collect_sources(query: str, video_id: str = None, image_path: str = None) -> tuple[list[dict], list[str]]:
+    """Deterministic multimodal routing to keep retrieval reliable under all conditions."""
+    sources: list[dict] = []
+    used_strategies: list[str] = []
+
+    if image_path:
+        used_strategies.append("image-to-video")
+        image_hits = json.loads(_execute_tool("search_by_image", {
+            "image_path": image_path,
+            "video_id": video_id,
+            "n": 12,
+        }))
+        if isinstance(image_hits, list):
+            sources.extend(image_hits)
+
+    if _is_speech_query(query):
+        used_strategies.append("audio/transcript")
+        speech_hits = json.loads(_execute_tool("search_transcripts", {
+            "query": query,
+            "video_id": video_id,
+            "n": 12,
+        }))
+        if isinstance(speech_hits, list):
+            sources.extend(speech_hits)
+
+        caption_hits = json.loads(_execute_tool("search_by_caption", {
+            "query": query,
+            "video_id": video_id,
+            "n": 8,
+        }))
+        if isinstance(caption_hits, list):
+            sources.extend(caption_hits)
+    else:
+        used_strategies.append("text-to-video")
+        caption_hits = json.loads(_execute_tool("search_by_caption", {
+            "query": query,
+            "video_id": video_id,
+            "n": 12,
+        }))
+        if isinstance(caption_hits, list):
+            sources.extend(caption_hits)
+
+        visual_hits = json.loads(_execute_tool("search_by_visual_similarity", {
+            "query": query,
+            "video_id": video_id,
+            "n": 12,
+        }))
+        if isinstance(visual_hits, list):
+            sources.extend(visual_hits)
+
+    deduped: list[dict] = []
+    seen = set()
+    for src in sources:
+        key = (
+            src.get("video_id"),
+            src.get("frame_number"),
+            src.get("timestamp"),
+            src.get("start_time"),
+            src.get("end_time"),
+            src.get("content"),
+            src.get("source_index"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(src)
+
+    deduped.sort(key=lambda item: item.get("score", 0), reverse=True)
+    return deduped, used_strategies
+
+
+def _render_answer(query: str, sources: list[dict], strategies: list[str], video_id: str = None) -> str:
+    if not sources:
+        scope = f" in video {video_id}" if video_id else ""
+        return f"I could not find strong evidence matches for this query{scope}. Try a more specific object, person, or spoken phrase."
+
+    lines = [f"Found evidence using: {', '.join(sorted(set(strategies)))}"]
+
+    return "\n".join(lines)
+
+
 def run_agent(query: str, video_id: str = None, image_path: str = None, conversation_history: list = None) -> dict:
     """
     Run the agentic loop:
@@ -133,155 +307,67 @@ def run_agent(query: str, video_id: str = None, image_path: str = None, conversa
     2. If tool_calls → execute → send results back
     3. Return final answer with sources
     """
-    client = _get_groq_client()
+    sources, strategies = _collect_sources(query=query, video_id=video_id, image_path=image_path)
+    answer = _render_answer(query=query, sources=sources, strategies=strategies, video_id=video_id)
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-
-    if conversation_history:
-        messages.extend(conversation_history)
-
-    # Build user message
-    user_msg = query
-    if video_id:
-        user_msg += f"\n\n[Context: The user is asking about video ID: {video_id}]"
-    if image_path:
-        user_msg += f"\n\n[Context: The user provided a reference image at: {image_path}. Use search_by_image tool with this path.]"
-
-    messages.append({"role": "user", "content": user_msg})
-
-    all_sources = []
-    max_iterations = 5  # prevent infinite loops
-
-    for iteration in range(max_iterations):
+    # Optional concise LLM polish (no tool-calling) if explicitly enabled.
+    if ENABLE_LLM_POLISH and GROQ_API_KEY and sources:
         try:
-            response = client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=messages,
-                tools=TOOL_DEFINITIONS,
-                tool_choice="auto",
-                temperature=0.1,
-                max_tokens=4096,
+            client = _get_groq_client()
+            compact_sources = [
+                {
+                    "video_id": s.get("video_id"),
+                    "timestamp": s.get("timestamp"),
+                    "start_time": s.get("start_time"),
+                    "end_time": s.get("end_time"),
+                    "source_index": s.get("source_index"),
+                    "content": s.get("content", "")[:120],
+                }
+                for s in sources[:8]
+            ]
+            prompt = (
+                "Summarize forensic video retrieval results in 4-6 bullet points. "
+                "Do not ask follow-up questions. Mention timestamps and source indexes.\n"
+                f"Query: {query}\n"
+                f"Results: {json.dumps(compact_sources)}"
             )
+            polished = client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=400,
+            )
+            text = polished.choices[0].message.content
+            if text:
+                answer = text
         except Exception as e:
-            error_str = str(e)
-            logger.error(f"Groq API error: {error_str}")
+            logger.warning(f"Answer polishing skipped due to Groq error: {e}")
 
-            # Handle tool_use_failed — extract the failed_generation text
-            if "tool_use_failed" in error_str or "failed_generation" in error_str:
-                # Try to extract the actual generated text from the error
-                try:
-                    # Parse the error to find the failed_generation
-                    import re
-                    match = re.search(r"'failed_generation':\s*'(.+?)'}", error_str)
-                    if match:
-                        generated_text = match.group(1)
-                        logger.info(f"Recovered failed_generation: {generated_text[:100]}...")
-                        return {
-                            "answer": generated_text,
-                            "clips": _build_clips(all_sources),
-                            "sources": all_sources[:20],
-                        }
-                except Exception:
-                    pass
-
-                # If we can't parse it, retry without tools
-                try:
-                    logger.info("Retrying without tools after tool_use_failed...")
-                    fallback_response = client.chat.completions.create(
-                        model=GROQ_MODEL,
-                        messages=messages,
-                        temperature=0.1,
-                        max_tokens=4096,
-                    )
-                    answer = fallback_response.choices[0].message.content or "Could not generate a response."
-                    return {
-                        "answer": answer,
-                        "clips": _build_clips(all_sources),
-                        "sources": all_sources[:20],
-                    }
-                except Exception as fallback_err:
-                    logger.error(f"Fallback also failed: {fallback_err}")
-
-            return {
-                "answer": f"I encountered an error communicating with the AI service: {error_str}",
-                "clips": [],
-                "sources": [],
-            }
-
-        choice = response.choices[0]
-
-        # Fix 2: Check for tool_calls by looking at the message object directly,
-        # not just finish_reason (Groq can return tool_calls with finish_reason="stop")
-        has_tool_calls = (
-            choice.message.tool_calls is not None
-            and len(choice.message.tool_calls) > 0
-        )
-
-        if has_tool_calls:
-            # Add assistant message with tool calls
-            messages.append(choice.message)
-
-            for tool_call in choice.message.tool_calls:
-                fn_name = tool_call.function.name
-                try:
-                    fn_args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
-                    logger.error(f"Failed to parse tool args: {tool_call.function.arguments}")
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": json.dumps({"error": "Invalid tool arguments"}),
-                    })
-                    continue
-
-                # Override video_id if user scoped to a specific video
-                if video_id and "video_id" not in fn_args:
-                    fn_args["video_id"] = video_id
-
-                logger.info(f"Executing tool: {fn_name}({fn_args})")
-                result = _execute_tool(fn_name, fn_args)
-
-                # Track sources
-                try:
-                    parsed = json.loads(result)
-                    if isinstance(parsed, list):
-                        all_sources.extend(parsed)
-                except Exception:
-                    pass
-
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result,
-                })
-
-            continue  # loop back for next LLM response
-
-        # Model is done — return final answer
-        answer = choice.message.content or "I couldn't generate a response."
-
-        return {
-            "answer": answer,
-            "clips": _build_clips(all_sources),
-            "sources": all_sources[:20],
-        }
-
-    # If we exhausted iterations
     return {
-        "answer": "I performed multiple search operations but couldn't fully resolve the query. Please try rephrasing.",
-        "clips": [],
-        "sources": all_sources,
+        "answer": answer,
+        "clips": _build_clips(sources),
+        "sources": sources[:20],
     }
 
 
 def _build_clips(all_sources: list) -> list:
-    """Build deduplicated clip list from search sources."""
+    """Build deduplicated clip list from search sources with existing frame images only."""
     clips = []
     seen_clips = set()
+
+    def _frame_exists(video_id: str, frame_path: str) -> bool:
+        if not frame_path:
+            return False
+        frame_name = frame_path.split("/")[-1]
+        if not frame_name:
+            return False
+        return (FRAMES_DIR / video_id / frame_name).exists()
+
     for src in all_sources:
         vid = src.get("video_id", "")
         ts = src.get("timestamp") or src.get("start_time")
-        if vid and ts is not None:
+        frame_path = src.get("frame_path", "")
+        if vid and ts is not None and _frame_exists(vid, frame_path):
             clip_key = f"{vid}_{ts}"
             if clip_key not in seen_clips:
                 seen_clips.add(clip_key)
@@ -289,7 +375,7 @@ def _build_clips(all_sources: list) -> list:
                     "video_id": vid,
                     "start_time": float(ts),
                     "end_time": float(src.get("end_time", ts + 2)),
-                    "frame_paths": [src.get("frame_path", "")] if src.get("frame_path") else [],
+                    "frame_paths": [frame_path],
                     "description": src.get("content", ""),
                 })
     return clips[:20]  # increased from 10 to 20
