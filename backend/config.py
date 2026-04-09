@@ -52,10 +52,14 @@ if CAPTION_MODE not in {"sync", "async", "off"}:
 CAPTION_BACKEND = os.getenv("CAPTION_BACKEND", "clip").strip().lower()
 if CAPTION_BACKEND not in {"clip", "blip"}:
     CAPTION_BACKEND = "clip"
+ENABLE_QUERY_TIME_CAPTIONING = os.getenv("ENABLE_QUERY_TIME_CAPTIONING", "false").strip().lower() == "true"
 
 # Groq
 GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 ENABLE_LLM_POLISH = os.getenv("ENABLE_LLM_POLISH", "false").strip().lower() == "true"
+# Enable on-demand BLIP captioning at query time for frames with no indexed caption.
+# Expensive (runs BLIP model per frame) — keep False unless you have a GPU.
+ENABLE_QUERY_TIME_CAPTIONING = os.getenv("ENABLE_QUERY_TIME_CAPTIONING", "false").strip().lower() == "true"
 
 # Server
 BACKEND_PORT = int(os.getenv("BACKEND_PORT", "8000"))

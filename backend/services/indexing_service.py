@@ -65,9 +65,11 @@ def get_chroma_client():
     )
     _caption_col = _chroma_client.get_or_create_collection(
         name=CAPTION_COLLECTION,
+        metadata={"hnsw:space": "cosine"}
     )
     _speech_col = _chroma_client.get_or_create_collection(
         name=SPEECH_COLLECTION,
+        metadata={"hnsw:space": "cosine"}
     )
 
     logger.info("ChromaDB collections ready.")
@@ -192,7 +194,7 @@ def search_images(query_embedding: list[float], n: int = 10, video_id: str = Non
 
     where = {"video_id": video_id} if video_id else None
     requested = max(1, n)
-    probe_n = min(max(requested * 8, requested), count)
+    probe_n = min(max(requested * 3, requested), count)
     try:
         results = _image_col.query(
             query_embeddings=[query_embedding],
@@ -215,7 +217,7 @@ def search_images(query_embedding: list[float], n: int = 10, video_id: str = Non
                 continue
             hits.append({
                 "id": id_,
-                "score": round(1 - dist, 4),  # cosine distance to similarity
+                "score": round(max(0, 1 - dist), 4),  # cosine distance to similarity
                 "video_id": vid,
                 "frame_number": meta.get("frame_number"),
                 "timestamp": meta.get("timestamp"),
@@ -238,7 +240,7 @@ def search_captions(query_text: str, n: int = 10, video_id: str = None) -> list[
 
     where = {"video_id": video_id} if video_id else None
     requested = max(1, n)
-    probe_n = min(max(requested * 8, requested), count)
+    probe_n = min(max(requested * 3, requested), count)
     query_embedding = embedding_service.embed_text(query_text)
     try:
         results = _caption_col.query(
@@ -263,7 +265,7 @@ def search_captions(query_text: str, n: int = 10, video_id: str = None) -> list[
                 continue
             hits.append({
                 "id": id_,
-                "score": round(1 - dist, 4) if dist < 2 else round(dist, 4),
+                "score": round(max(0, 1 - dist), 4),  # cosine distance to similarity
                 "video_id": vid,
                 "frame_number": meta.get("frame_number"),
                 "timestamp": meta.get("timestamp"),
@@ -306,7 +308,7 @@ def search_transcripts(query_text: str, n: int = 10, video_id: str = None) -> li
             dist = results["distances"][0][i] if results["distances"] else 0
             hits.append({
                 "id": id_,
-                "score": round(1 - dist, 4) if dist < 2 else round(dist, 4),
+                "score": round(max(0, 1 - dist), 4),  # cosine distance to similarity
                 "video_id": meta.get("video_id", ""),
                 "start_time": meta.get("start_time"),
                 "end_time": meta.get("end_time"),
