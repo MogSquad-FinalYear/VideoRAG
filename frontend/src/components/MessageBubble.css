@@ -72,6 +72,33 @@
   border: 1px solid var(--border-color);
 }
 
+/* ── User Image Attachment ─────────────────────────────────────────────────── */
+.msg__user-image {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.msg__user-image-thumb {
+  max-width: 180px;
+  max-height: 140px;
+  border-radius: 10px;
+  object-fit: cover;
+  border: 2px solid rgba(245, 158, 11, 0.25);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
+}
+
+.msg__user-image-label {
+  font-size: 0.68rem;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 180px;
+}
+
 .msg--ai .msg__text {
   background: var(--glass-bg);
   backdrop-filter: blur(12px);

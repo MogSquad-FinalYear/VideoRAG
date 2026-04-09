@@ -44,6 +44,14 @@ You have access to a multimodal video retrieval system with 3 indexes:
 - For questions about **spoken words or dialogue**: Use `search_transcripts`.
 - **ALWAYS call at least 2 different search tools** for any question about video content. Cross-reference results from visual similarity AND captions for the most accurate answer.
 
+## IMAGE-BASED SEARCH
+When the user uploads a reference image:
+- The system has ALREADY performed visual similarity search using the image's CLIP embedding.
+- The search results you receive include frames that visually resemble the uploaded image.
+- Your job is to **analyze the results**, identify who/what appears in the matching frames, and give a clear answer.
+- Describe what you see: who the person is (if identifiable), what they're doing, and when they appear.
+- Report ALL occurrences — don't stop at the first match.
+
 ## CRITICAL RULES
 1. You MUST call search tools before answering. NEVER answer from assumptions.
 2. ALWAYS use `search_by_visual_similarity` when the question is about a person, character, or specific object.
@@ -73,6 +81,8 @@ def _execute_tool(tool_name: str, args: dict) -> str:
                 n=args.get("n", 10),
                 video_id=args.get("video_id"),
             )
+            for r in results:
+                r["content"] = f"Visual similarity match for: '{args['query']}'"
             return json.dumps(results, indent=2)
 
         elif tool_name == "search_transcripts":
@@ -90,6 +100,8 @@ def _execute_tool(tool_name: str, args: dict) -> str:
                 n=args.get("n", 10),
                 video_id=args.get("video_id"),
             )
+            for r in results:
+                r["content"] = f"Visual match for uploaded reference image."
             return json.dumps(results, indent=2)
 
         elif tool_name == "get_video_clip_info":
@@ -229,12 +241,23 @@ def _collect_sources(query: str, video_id: str = None, image_path: str = None) -
         image_hits = json.loads(_execute_tool("search_by_image", {
             "image_path": image_path,
             "video_id": video_id,
-            "n": 12,
+            "n": 15,  # Boost for image search — we want all occurrences
         }))
         if isinstance(image_hits, list):
             sources.extend(image_hits)
 
-    if _is_speech_query(query):
+        # Also run text-based visual similarity using the query for cross-referencing
+        if query and query.strip().lower() not in ("find frames similar to this image", ""):
+            used_strategies.append("text-to-video (cross-ref)")
+            text_visual_hits = json.loads(_execute_tool("search_by_visual_similarity", {
+                "query": query,
+                "video_id": video_id,
+                "n": 10,
+            }))
+            if isinstance(text_visual_hits, list):
+                sources.extend(text_visual_hits)
+
+    elif _is_speech_query(query):
         used_strategies.append("audio/transcript")
         speech_hits = json.loads(_execute_tool("search_transcripts", {
             "query": query,
@@ -308,10 +331,9 @@ def run_agent(query: str, video_id: str = None, image_path: str = None, conversa
     3. Return final answer with sources
     """
     sources, strategies = _collect_sources(query=query, video_id=video_id, image_path=image_path)
-    answer = _render_answer(query=query, sources=sources, strategies=strategies, video_id=video_id)
-
-    # Optional concise LLM polish (no tool-calling) if explicitly enabled.
-    if ENABLE_LLM_POLISH and GROQ_API_KEY and sources:
+    
+    answer = None
+    if GROQ_API_KEY and sources:
         try:
             client = _get_groq_client()
             compact_sources = [
@@ -322,26 +344,58 @@ def run_agent(query: str, video_id: str = None, image_path: str = None, conversa
                     "end_time": s.get("end_time"),
                     "source_index": s.get("source_index"),
                     "content": s.get("content", "")[:120],
+                    "score": round(s.get("score", 0), 3),
                 }
-                for s in sources[:8]
+                for s in sources[:10]
             ]
-            prompt = (
-                "Summarize forensic video retrieval results in 4-6 bullet points. "
-                "Do not ask follow-up questions. Mention timestamps and source indexes.\n"
-                f"Query: {query}\n"
-                f"Results: {json.dumps(compact_sources)}"
-            )
+
+            if image_path:
+                task_prompt = (
+                    "The user uploaded a reference image and provided this query: "
+                    f"'{query}'.\n\n"
+                    "Based on the visual match search results below, provide a professional, structured forensic analysis report.\n"
+                    "Your response MUST be structured exactly like this:\n\n"
+                    "### Findings\n"
+                    "- State clearly if the person or object in the reference image appears in the video.\n"
+                    "- Describe what they are doing or the context of their appearance based on the search results.\n\n"
+                    "### Confirmed Timestamps\n"
+                    "- List the exact timestamps where they appear, using [MM:SS] format.\n"
+                    "- Group consecutive timestamps into ranges (e.g., [00:11] to [00:15]).\n\n"
+                    "Be highly specific, confident, and professional. Do NOT rely on prior assumptions, only use the search results. Do NOT ask follow-up questions.\n"
+                    f"Search results: {json.dumps(compact_sources)}"
+                )
+            else:
+                task_prompt = (
+                    "Based on the following video search results, provide a professional, structured forensic analysis report in response to the user's query.\n"
+                    "Your response MUST be structured exactly like this:\n\n"
+                    "### Analysis\n"
+                    "- Provide a direct answer to the user's question.\n"
+                    "- Summarize the key events, spoken words, or visual evidence found.\n\n"
+                    "### Evidence Timestamps\n"
+                    "- List the specific times where the evidence occurs using [MM:SS] format.\n"
+                    "- Group consecutive hits into ranges (e.g., [00:11] to [00:15]).\n\n"
+                    "Be highly specific, confident, and professional. Do NOT rely on prior assumptions, only use the search results. Do NOT ask follow-up questions.\n"
+                    f"Query: {query}\n"
+                    f"Search results: {json.dumps(compact_sources)}"
+                )
+
             polished = client.chat.completions.create(
                 model=GROQ_MODEL,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": task_prompt}
+                ],
                 temperature=0.1,
-                max_tokens=400,
+                max_tokens=600,
             )
             text = polished.choices[0].message.content
             if text:
                 answer = text
         except Exception as e:
-            logger.warning(f"Answer polishing skipped due to Groq error: {e}")
+            logger.warning(f"Answer generation error: {e}")
+
+    if not answer:
+        answer = _render_answer(query, sources, strategies, video_id)
 
     return {
         "answer": answer,
@@ -351,9 +405,8 @@ def run_agent(query: str, video_id: str = None, image_path: str = None, conversa
 
 
 def _build_clips(all_sources: list) -> list:
-    """Build deduplicated clip list from search sources with existing frame images only."""
+    """Build deduplicated clip list from search sources with temporally merged bounds."""
     clips = []
-    seen_clips = set()
 
     def _frame_exists(video_id: str, frame_path: str) -> bool:
         if not frame_path:
@@ -365,17 +418,28 @@ def _build_clips(all_sources: list) -> list:
 
     for src in all_sources:
         vid = src.get("video_id", "")
-        ts = src.get("timestamp") or src.get("start_time")
+        ts = float(src.get("timestamp") or src.get("start_time") or 0.0)
         frame_path = src.get("frame_path", "")
-        if vid and ts is not None and _frame_exists(vid, frame_path):
-            clip_key = f"{vid}_{ts}"
-            if clip_key not in seen_clips:
-                seen_clips.add(clip_key)
+        
+        if vid and _frame_exists(vid, frame_path):
+            merged = False
+            for clip in clips:
+                # Merge clips that are close to each other (e.g., within 4 seconds)
+                if clip["video_id"] == vid and abs(clip["start_time"] - ts) <= 4.0:
+                    clip["start_time"] = min(clip["start_time"], ts)
+                    clip["end_time"] = max(clip["end_time"], ts + 2.0)
+                    if frame_path not in clip["frame_paths"]:
+                        clip["frame_paths"].append(frame_path)
+                    merged = True
+                    break
+                    
+            if not merged:
                 clips.append({
                     "video_id": vid,
-                    "start_time": float(ts),
-                    "end_time": float(src.get("end_time", ts + 2)),
-                    "frame_paths": [frame_path],
+                    "start_time": ts,
+                    "end_time": float(src.get("end_time", ts + 2.0)),
+                    "frame_paths": [frame_path] if frame_path else [],
                     "description": src.get("content", ""),
                 })
-    return clips[:20]  # increased from 10 to 20
+                
+    return clips[:5]  # Limit to 5 clips to avoid UI spam

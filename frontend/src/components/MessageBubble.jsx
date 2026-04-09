@@ -74,7 +74,22 @@ export default function MessageBubble({ message, onClipClick }) {
 
         {/* Text — render markdown for AI, plain text for user */}
         {isUser ? (
-          <div className="msg__text">{message.text}</div>
+          <>
+            {/* Show attached reference image in user message */}
+            {message.imageUrl && (
+              <div className="msg__user-image">
+                <img
+                  src={message.imageUrl}
+                  alt={message.imageName || 'Reference image'}
+                  className="msg__user-image-thumb"
+                />
+                <span className="msg__user-image-label">
+                  📸 {message.imageName || 'Reference image'}
+                </span>
+              </div>
+            )}
+            <div className="msg__text">{message.text}</div>
+          </>
         ) : (
           <div
             className="msg__text msg__text--markdown"

@@ -13,6 +13,7 @@ export default function ChatWindow({ videoId, onClipClick }) {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [referenceImage, setReferenceImage] = useState(null);
+  const [imagePreviewUrl, setImagePreviewUrl] = useState(null);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const imageInputRef = useRef(null);
@@ -27,24 +28,48 @@ export default function ChatWindow({ videoId, onClipClick }) {
     inputRef.current?.focus();
   }, []);
 
+  // Create/revoke preview URL when image changes
+  useEffect(() => {
+    if (referenceImage) {
+      const url = URL.createObjectURL(referenceImage);
+      setImagePreviewUrl(url);
+      return () => URL.revokeObjectURL(url);
+    } else {
+      setImagePreviewUrl(null);
+    }
+  }, [referenceImage]);
+
+  const handleImageSelect = (e) => {
+    const file = e.target.files?.[0] || null;
+    setReferenceImage(file);
+    // Reset file input so the same file can be selected again
+    e.target.value = '';
+  };
+
   const handleSend = async () => {
     const query = input.trim();
-    if (!query || loading) return;
+    if ((!query && !referenceImage) || loading) return;
 
+    // Build user message with optional image preview
     const userMsg = {
       id: `msg-${++msgIdCounter}`,
       role: 'user',
-      text: query,
+      text: query || 'Find frames similar to this image',
+      imageUrl: imagePreviewUrl, // Attach preview for display
+      imageName: referenceImage?.name,
     };
 
     setMessages((prev) => [...prev, userMsg]);
+    const queryToSend = query || 'Find frames similar to this image';
+    const imageToSend = referenceImage;
     setInput('');
+    // Keep image state until send completes but don't clear preview URL yet
     setLoading(true);
 
     try {
-      const result = referenceImage
-        ? await sendMessageWithImage(query, referenceImage, videoId)
-        : await sendMessage(query, videoId);
+      const result = imageToSend
+        ? await sendMessageWithImage(queryToSend, imageToSend, videoId)
+        : await sendMessage(queryToSend, videoId);
 
       const aiMsg = {
         id: `msg-${++msgIdCounter}`,
@@ -55,7 +80,6 @@ export default function ChatWindow({ videoId, onClipClick }) {
       };
 
       setMessages((prev) => [...prev, aiMsg]);
-      setReferenceImage(null);
     } catch (err) {
       const errorMsg = {
         id: `msg-${++msgIdCounter}`,
@@ -66,14 +90,16 @@ export default function ChatWindow({ videoId, onClipClick }) {
       };
       setMessages((prev) => [...prev, errorMsg]);
     } finally {
+      setReferenceImage(null);
       setLoading(false);
       inputRef.current?.focus();
     }
   };
 
-  // Fix 13: Clear chat
+  // Clear chat
   const handleClearChat = () => {
     setMessages([]);
+    setReferenceImage(null);
     msgIdCounter = 0;
     inputRef.current?.focus();
   };
@@ -85,8 +111,23 @@ export default function ChatWindow({ videoId, onClipClick }) {
     }
   };
 
+  // Drag and drop support
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const file = e.dataTransfer?.files?.[0];
+    if (file && file.type.startsWith('image/')) {
+      setReferenceImage(file);
+    }
+  };
+
   return (
-    <div className="chat">
+    <div className="chat" onDragOver={handleDragOver} onDrop={handleDrop}>
       {/* Header */}
       <div className="chat__header">
         <div className="chat__header-info">
@@ -153,8 +194,10 @@ export default function ChatWindow({ videoId, onClipClick }) {
               <button className="chat__suggestion" onClick={() => setInput('Show me frames with a person walking')}>
                 🖼️ Show me frames with a person walking
               </button>
-              <button className="chat__suggestion" onClick={() => setInput('Find scenes with vehicles')}>
-                🚗 Find scenes with vehicles
+              <button className="chat__suggestion" onClick={() => {
+                imageInputRef.current?.click();
+              }}>
+                📸 Upload image to identify a person or object
               </button>
             </div>
           </div>
@@ -188,33 +231,45 @@ export default function ChatWindow({ videoId, onClipClick }) {
 
       {/* Input */}
       <div className="chat__input-area">
-        {referenceImage && (
-          <div className="chat__reference-image">
-            <span className="chat__reference-image-label">Image Reference: {referenceImage.name}</span>
+        {/* Image preview bar */}
+        {referenceImage && imagePreviewUrl && (
+          <div className="chat__image-preview">
+            <div className="chat__image-preview-left">
+              <img
+                src={imagePreviewUrl}
+                alt="Reference"
+                className="chat__image-preview-thumb"
+              />
+              <div className="chat__image-preview-info">
+                <span className="chat__image-preview-label">📸 Reference Image</span>
+                <span className="chat__image-preview-name">{referenceImage.name}</span>
+              </div>
+            </div>
             <button
-              className="chat__reference-image-remove"
+              className="chat__image-preview-remove"
               onClick={() => setReferenceImage(null)}
               title="Remove reference image"
             >
-              Remove
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
             </button>
           </div>
         )}
+
         <div className="chat__input-wrapper">
           <input
             ref={imageInputRef}
             type="file"
             accept="image/*"
             hidden
-            onChange={(e) => {
-              const file = e.target.files?.[0] || null;
-              setReferenceImage(file);
-            }}
+            onChange={handleImageSelect}
           />
           <button
             className="chat__attach-btn"
             onClick={() => imageInputRef.current?.click()}
-            title="Attach reference image"
+            title="Attach reference image for visual search"
             disabled={loading}
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -229,7 +284,7 @@ export default function ChatWindow({ videoId, onClipClick }) {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Ask about your evidence videos..."
+            placeholder={referenceImage ? "Ask about this image (e.g. 'Is this person in the video?')" : "Ask about your evidence videos..."}
             rows={1}
             disabled={loading}
             id="chat-input"
@@ -237,7 +292,7 @@ export default function ChatWindow({ videoId, onClipClick }) {
           <button
             className="chat__send-btn"
             onClick={handleSend}
-            disabled={!input.trim() || loading}
+            disabled={(!input.trim() && !referenceImage) || loading}
             id="send-button"
             title="Send message"
           >
@@ -248,7 +303,7 @@ export default function ChatWindow({ videoId, onClipClick }) {
           </button>
         </div>
         <p className="chat__input-hint">
-          Press <kbd>Enter</kbd> to send · <kbd>Shift+Enter</kbd> for new line · attach image for visual search
+          Press <kbd>Enter</kbd> to send · <kbd>Shift+Enter</kbd> for new line · 📸 attach image for visual search · drag &amp; drop supported
         </p>
       </div>
     </div>

@@ -247,34 +247,100 @@
   cursor: not-allowed;
 }
 
-.chat__reference-image {
+/* ── Image Preview ─────────────────────────────────────────────────────────── */
+.chat__image-preview {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 8px;
-  padding: 8px 10px;
-  border: 1px solid var(--border-color);
+  gap: 12px;
+  margin-bottom: 10px;
+  padding: 10px 14px;
+  border: 1px solid rgba(245, 158, 11, 0.2);
   border-radius: var(--radius-md);
-  background: var(--bg-tertiary);
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.06), rgba(217, 119, 6, 0.04));
+  animation: fadeInUp 0.2s ease-out;
 }
 
-.chat__reference-image-label {
+.chat__image-preview-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+
+.chat__image-preview-thumb {
+  width: 48px;
+  height: 48px;
+  border-radius: 6px;
+  object-fit: cover;
+  border: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.chat__image-preview-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.chat__image-preview-label {
   font-size: 0.76rem;
-  color: var(--text-secondary);
+  font-weight: 600;
+  color: var(--accent-primary);
+}
+
+.chat__image-preview-name {
+  font-size: 0.72rem;
+  color: var(--text-tertiary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.chat__reference-image-remove {
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: var(--danger);
+.chat__image-preview-remove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
   background: transparent;
-  padding: 3px 8px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.chat__image-preview-remove:hover {
+  color: var(--danger);
+  background: rgba(239, 68, 68, 0.1);
+}
+
+/* ── Attach Button ─────────────────────────────────────────────────────────── */
+.chat__attach-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
   border-radius: var(--radius-sm);
-  border: 1px solid rgba(239, 68, 68, 0.3);
+  background: transparent;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+  transition: all var(--transition-fast);
+  cursor: pointer;
+}
+
+.chat__attach-btn:hover:not(:disabled) {
+  color: var(--accent-primary);
+  background: var(--accent-subtle);
+}
+
+.chat__attach-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
 }
 
 .chat__input-wrapper:focus-within {

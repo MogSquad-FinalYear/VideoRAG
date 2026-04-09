@@ -1,11 +1,11 @@
 /**
  * VideoPlayer — Lightweight player for clip playback with frame gallery.
  */
-import { useState } from 'react';
+import { useRef } from 'react';
 import './VideoPlayer.css';
 
 export default function VideoPlayer({ clip, onClose }) {
-  const [currentFrame, setCurrentFrame] = useState(0);
+  const videoRef = useRef(null);
 
   if (!clip) return null;
 
@@ -37,73 +37,20 @@ export default function VideoPlayer({ clip, onClose }) {
         </button>
       </div>
 
-      {/* Frame Display */}
+      {/* Real Video Player */}
       <div className="player__viewport">
-        {frames.length > 0 ? (
-          <img
-            src={frames[currentFrame]}
-            alt={`Frame at ${formatTime(clip.start_time + currentFrame)}`}
-            className="player__frame"
-          />
-        ) : (
-          <div className="player__placeholder">
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" strokeWidth="1.5">
-              <rect x="2" y="4" width="20" height="16" rx="3" />
-              <polygon points="10,8 10,16 16,12" />
-            </svg>
-            <p>No frames available</p>
-          </div>
-        )}
+        <video 
+          ref={videoRef}
+          key={clip.video_id + clip.start_time}
+          src={`/videos/${clip.video_id}/play#t=${clip.start_time},${clip.end_time || clip.start_time + 5}`}
+          controls
+          autoPlay
+          className="player__video"
+          style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+        >
+          Your browser does not support the video tag.
+        </video>
       </div>
-
-      {/* Timeline */}
-      <div className="player__timeline">
-        <span className="player__time">{formatTime(clip.start_time)}</span>
-        <div className="player__progress">
-          <div
-            className="player__progress-fill"
-            style={{
-              width: frames.length > 1
-                ? `${(currentFrame / (frames.length - 1)) * 100}%`
-                : '100%',
-            }}
-          />
-        </div>
-        <span className="player__time">{formatTime(clip.end_time)}</span>
-      </div>
-
-      {/* Controls */}
-      {frames.length > 1 && (
-        <div className="player__controls">
-          <button
-            className="player__btn"
-            onClick={() => setCurrentFrame((f) => Math.max(0, f - 1))}
-            disabled={currentFrame === 0}
-            title="Previous frame"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <polygon points="19 20 9 12 19 4 19 20" />
-              <line x1="5" y1="19" x2="5" y2="5" />
-            </svg>
-          </button>
-
-          <span className="player__frame-count">
-            Frame {currentFrame + 1} / {frames.length}
-          </span>
-
-          <button
-            className="player__btn"
-            onClick={() => setCurrentFrame((f) => Math.min(frames.length - 1, f + 1))}
-            disabled={currentFrame === frames.length - 1}
-            title="Next frame"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <polygon points="5 4 15 12 5 20 5 4" />
-              <line x1="19" y1="5" x2="19" y2="19" />
-            </svg>
-          </button>
-        </div>
-      )}
 
       {/* Clip Info */}
       <div className="player__info">
@@ -126,17 +73,27 @@ export default function VideoPlayer({ clip, onClose }) {
       </div>
 
       {/* Frame Thumbnails */}
-      {frames.length > 1 && (
+      {frames.length > 0 && (
         <div className="player__thumbstrip">
-          {frames.map((framePath, i) => (
-            <button
-              key={i}
-              className={`player__thumb ${i === currentFrame ? 'player__thumb--active' : ''}`}
-              onClick={() => setCurrentFrame(i)}
-            >
-              <img src={framePath} alt={`Frame ${i + 1}`} />
-            </button>
-          ))}
+          {frames.map((framePath, i) => {
+            const match = framePath.match(/frame_(\d+)/);
+            const ts = match ? parseInt(match[1], 10) : clip.start_time;
+            return (
+              <button
+                key={i}
+                className="player__thumb"
+                title={`Jump to ${formatTime(ts)}`}
+                onClick={() => {
+                  if (videoRef.current) {
+                    videoRef.current.currentTime = ts;
+                    videoRef.current.play();
+                  }
+                }}
+              >
+                <img src={framePath} alt={`Frame at ${formatTime(ts)}`} />
+              </button>
+            );
+          })}
         </div>
       )}
     </div>
