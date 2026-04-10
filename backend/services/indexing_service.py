@@ -17,6 +17,17 @@ _caption_col = None
 _speech_col = None
 
 
+def _extract_frame_number(frame_path: str) -> int | None:
+    """Extract numeric frame index from frame filename like frame_000123.jpg."""
+    try:
+        stem = Path(frame_path).stem
+        if not stem.startswith("frame_"):
+            return None
+        return int(stem.split("_")[1])
+    except Exception:
+        return None
+
+
 def _to_url_path(absolute_path: str, video_id: str) -> str:
     """Convert an absolute frame path to a relative URL path for the browser.
     e.g. 'C:\\...\\data\\frames\\abc123\\frame_000007.jpg' -> '/frames/abc123/frame_000007.jpg'
@@ -65,9 +76,11 @@ def get_chroma_client():
     )
     _caption_col = _chroma_client.get_or_create_collection(
         name=CAPTION_COLLECTION,
+        metadata={"hnsw:space": "cosine"}
     )
     _speech_col = _chroma_client.get_or_create_collection(
         name=SPEECH_COLLECTION,
+        metadata={"hnsw:space": "cosine"}
     )
 
     logger.info("ChromaDB collections ready.")
@@ -90,12 +103,15 @@ def index_frames(video_id: str, frame_paths: list[str], embeddings: list[list[fl
     ids = []
     metadatas = []
     for i, path in enumerate(frame_paths):
-        frame_id = f"{video_id}_frame_{i}"
+        frame_number = _extract_frame_number(path)
+        if frame_number is None:
+            frame_number = i
+        frame_id = f"{video_id}_frame_{frame_number}"
         ids.append(frame_id)
         metadatas.append({
             "video_id": video_id,
-            "frame_number": i,
-            "timestamp": round(i / fps, 2),
+            "frame_number": frame_number,
+            "timestamp": round(frame_number / fps, 2),
             "frame_path": _to_url_path(path, video_id),  # Store as relative URL
         })
 
@@ -120,12 +136,15 @@ def index_captions(video_id: str, frame_paths: list[str], captions: list[str], f
     for i, (path, caption) in enumerate(zip(frame_paths, captions)):
         if not caption:
             continue
-        ids.append(f"{video_id}_caption_{i}")
+        frame_number = _extract_frame_number(path)
+        if frame_number is None:
+            frame_number = i
+        ids.append(f"{video_id}_caption_{frame_number}")
         documents.append(caption)
         metadatas.append({
             "video_id": video_id,
-            "frame_number": i,
-            "timestamp": round(i / fps, 2),
+            "frame_number": frame_number,
+            "timestamp": round(frame_number / fps, 2),
             "frame_path": _to_url_path(path, video_id),
         })
 
@@ -180,11 +199,16 @@ def index_transcripts(video_id: str, segments: list[dict]):
     logger.info(f"Indexed {len(ids)} transcript segments for video {video_id}")
 
 
-def search_images(query_embedding: list[float], n: int = 10, video_id: str = None) -> list[dict]:
+# Minimum similarity thresholds — results below these are noise, not signal
+_IMAGE_MIN_SCORE = 0.15
+_CAPTION_MIN_SCORE = 0.15
+_SPEECH_MIN_SCORE = 0.10
+
+
+def search_images(query_embedding: list[float], n: int = 10, video_id: str = None, min_score: float = _IMAGE_MIN_SCORE) -> list[dict]:
     """Search image index by CLIP embedding similarity."""
     get_chroma_client()
 
-    # Fix 5: Don't query empty collections
     count = _image_col.count()
     if count == 0:
         logger.warning("Image index is empty, nothing to search.")
@@ -209,13 +233,16 @@ def search_images(query_embedding: list[float], n: int = 10, video_id: str = Non
         for i, id_ in enumerate(results["ids"][0]):
             meta = results["metadatas"][0][i] if results["metadatas"] else {}
             dist = results["distances"][0][i] if results["distances"] else 0
+            score = round(1 - dist, 4)  # cosine distance to similarity
+            if score < min_score:
+                continue  # Skip noise results
             vid = meta.get("video_id", "")
             frame_path = _normalize_frame_path(meta.get("frame_path", ""), vid)
             if not _frame_url_exists(frame_path, vid):
                 continue
             hits.append({
                 "id": id_,
-                "score": round(1 - dist, 4),  # cosine distance to similarity
+                "score": score,
                 "video_id": vid,
                 "frame_number": meta.get("frame_number"),
                 "timestamp": meta.get("timestamp"),
@@ -257,13 +284,16 @@ def search_captions(query_text: str, n: int = 10, video_id: str = None) -> list[
             meta = results["metadatas"][0][i] if results["metadatas"] else {}
             doc = results["documents"][0][i] if results["documents"] else ""
             dist = results["distances"][0][i] if results["distances"] else 0
+            score = round(1 - dist, 4)  # cosine distance → similarity
+            if score < _CAPTION_MIN_SCORE:
+                continue  # Skip noise results
             vid = meta.get("video_id", "")
             frame_path = _normalize_frame_path(meta.get("frame_path", ""), vid)
             if not _frame_url_exists(frame_path, vid):
                 continue
             hits.append({
                 "id": id_,
-                "score": round(1 - dist, 4) if dist < 2 else round(dist, 4),
+                "score": score,
                 "video_id": vid,
                 "frame_number": meta.get("frame_number"),
                 "timestamp": meta.get("timestamp"),
@@ -274,6 +304,78 @@ def search_captions(query_text: str, n: int = 10, video_id: str = None) -> list[
             if len(hits) >= requested:
                 break
     return hits
+
+
+def search_captions_by_keyword(keyword: str, n: int = 10, video_id: str = None) -> list[dict]:
+    """Search caption index by keyword substring match in document text.
+
+    This supplements embedding search — when a user asks about 'car' we also
+    find captions that literally contain the word 'car'.
+    """
+    get_chroma_client()
+
+    count = _caption_col.count()
+    if count == 0:
+        return []
+
+    where = {"video_id": video_id} if video_id else None
+    try:
+        results = _caption_col.get(
+            where=where,
+            include=["metadatas", "documents"],
+        )
+    except Exception as e:
+        logger.error(f"Caption keyword search failed: {e}")
+        return []
+
+    if not results or not results["ids"]:
+        return []
+
+    keyword_lower = keyword.lower()
+    stop_words = {
+        "show", "find", "where", "when", "what", "which", "that", "this",
+        "with", "from", "into", "onto", "about", "there", "their", "have",
+        "give", "clip", "video", "scene", "frames", "frame", "please"
+    }
+    search_terms = [
+        t.strip()
+        for t in keyword_lower.replace(",", " ").replace(".", " ").split()
+        if len(t.strip()) > 2 and t.strip() not in stop_words
+    ]
+    if not search_terms:
+        return []
+
+    hits = []
+    for i, id_ in enumerate(results["ids"]):
+        doc = results["documents"][i] if results["documents"] else ""
+        meta = results["metadatas"][i] if results["metadatas"] else {}
+        doc_lower = doc.lower()
+        # Check if any search term appears in the caption.
+        matching_terms = [t for t in search_terms if t in doc_lower]
+        if not matching_terms:
+            continue
+        vid = meta.get("video_id", "")
+        frame_path = _normalize_frame_path(meta.get("frame_path", ""), vid)
+        if not _frame_url_exists(frame_path, vid):
+            continue
+        # Score based on term coverage, with bonus for event/action words.
+        event_terms = {"hit", "hits", "hitting", "crash", "collision", "fall", "fighting", "chasing"}
+        event_bonus = 0.1 if any(t in event_terms for t in matching_terms) else 0.0
+        match_score = round(0.45 + 0.14 * len(matching_terms) + event_bonus, 4)
+        hits.append({
+            "id": id_,
+            "score": min(match_score, 0.95),
+            "video_id": vid,
+            "frame_number": meta.get("frame_number"),
+            "timestamp": meta.get("timestamp"),
+            "frame_path": frame_path,
+            "content": doc,
+            "source_index": "caption",
+        })
+
+    # Sort by score descending and limit
+    hits.sort(key=lambda x: x["score"], reverse=True)
+    return hits[:n]
 
 
 def search_transcripts(query_text: str, n: int = 10, video_id: str = None) -> list[dict]:
@@ -304,9 +406,12 @@ def search_transcripts(query_text: str, n: int = 10, video_id: str = None) -> li
             meta = results["metadatas"][0][i] if results["metadatas"] else {}
             doc = results["documents"][0][i] if results["documents"] else ""
             dist = results["distances"][0][i] if results["distances"] else 0
+            score = round(1 - dist, 4)  # cosine distance → similarity
+            if score < _SPEECH_MIN_SCORE:
+                continue  # Skip noise results
             hits.append({
                 "id": id_,
-                "score": round(1 - dist, 4) if dist < 2 else round(dist, 4),
+                "score": score,
                 "video_id": meta.get("video_id", ""),
                 "start_time": meta.get("start_time"),
                 "end_time": meta.get("end_time"),

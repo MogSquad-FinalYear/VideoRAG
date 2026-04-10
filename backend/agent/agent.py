@@ -12,6 +12,21 @@ from backend.services import indexing_service, embedding_service
 
 logger = logging.getLogger(__name__)
 
+
+def _expand_visual_query(query: str) -> str:
+    """Expand user query with retrieval-friendly visual synonyms for CLIP text search."""
+    q = query.lower()
+    expansions = []
+    if any(t in q for t in ["bike", "bicycle", "motorbike", "motorcycle"]):
+        expansions.append("bike bicycle motorcycle scooter two wheeler")
+    if any(t in q for t in ["car", "vehicle", "auto"]):
+        expansions.append("car vehicle sedan hatchback")
+    if any(t in q for t in ["hit", "hits", "hitting", "crash", "collision", "accident"]):
+        expansions.append("collision crash accident impact hitting")
+    if not expansions:
+        return query
+    return f"{query}. Related visual concepts: {'; '.join(expansions)}"
+
 # ── Singleton Groq client (Fix 7) ────────────────────────────────────────────
 _groq_client = None
 
@@ -67,15 +82,31 @@ def _execute_tool(tool_name: str, args: dict) -> str:
     """Execute a tool call and return the result as a string."""
     try:
         if tool_name == "search_by_caption":
-            results = indexing_service.search_captions(
+            semantic_hits = indexing_service.search_captions(
                 query_text=args["query"],
                 n=args.get("n", 10),
                 video_id=args.get("video_id"),
             )
-            return json.dumps(results, indent=2)
+            keyword_hits = indexing_service.search_captions_by_keyword(
+                keyword=args["query"],
+                n=args.get("n", 10),
+                video_id=args.get("video_id"),
+            )
+            merged = semantic_hits + keyword_hits
+            merged.sort(key=lambda x: x.get("score", 0), reverse=True)
+            dedup = []
+            seen = set()
+            for hit in merged:
+                key = (hit.get("video_id"), hit.get("frame_number"), hit.get("timestamp"), hit.get("source_index"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                dedup.append(hit)
+            return json.dumps(dedup[:args.get("n", 10)], indent=2)
 
         elif tool_name == "search_by_visual_similarity":
-            text_embedding = embedding_service.embed_text(args["query"])
+            expanded_query = _expand_visual_query(args["query"])
+            text_embedding = embedding_service.embed_text(expanded_query)
             results = indexing_service.search_images(
                 query_embedding=text_embedding,
                 n=args.get("n", 10),
@@ -99,6 +130,7 @@ def _execute_tool(tool_name: str, args: dict) -> str:
                 query_embedding=image_embedding,
                 n=args.get("n", 10),
                 video_id=args.get("video_id"),
+                min_score=args.get("min_score", 0.22),
             )
             for r in results:
                 r["content"] = f"Visual match for uploaded reference image."
@@ -242,6 +274,7 @@ def _collect_sources(query: str, video_id: str = None, image_path: str = None) -
             "image_path": image_path,
             "video_id": video_id,
             "n": 15,  # Boost for image search — we want all occurrences
+            "min_score": 0.22,
         }))
         if isinstance(image_hits, list):
             sources.extend(image_hits)
@@ -293,23 +326,20 @@ def _collect_sources(query: str, video_id: str = None, image_path: str = None) -
             sources.extend(visual_hits)
 
     deduped: list[dict] = []
-    seen = set()
+    best_by_key = {}
     for src in sources:
-        key = (
-            src.get("video_id"),
-            src.get("frame_number"),
-            src.get("timestamp"),
-            src.get("start_time"),
-            src.get("end_time"),
-            src.get("content"),
-            src.get("source_index"),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(src)
+        key = (src.get("video_id"), src.get("frame_number"), src.get("timestamp"), src.get("start_time"), src.get("end_time"))
+        existing = best_by_key.get(key)
+        if existing is None or src.get("score", 0) > existing.get("score", 0):
+            best_by_key[key] = src
 
-    deduped.sort(key=lambda item: item.get("score", 0), reverse=True)
+    deduped = list(best_by_key.values())
+
+    source_boost = {"image": 0.12, "caption": 0.06, "speech": 0.03}
+    deduped.sort(
+        key=lambda item: item.get("score", 0) + (source_boost.get(item.get("source_index", ""), 0.0) if image_path else 0.0),
+        reverse=True,
+    )
     return deduped, used_strategies
 
 
@@ -319,6 +349,18 @@ def _render_answer(query: str, sources: list[dict], strategies: list[str], video
         return f"I could not find strong evidence matches for this query{scope}. Try a more specific object, person, or spoken phrase."
 
     lines = [f"Found evidence using: {', '.join(sorted(set(strategies)))}"]
+    for hit in sources[:5]:
+        vid = hit.get("video_id", "")
+        ts = hit.get("timestamp")
+        st = hit.get("start_time")
+        et = hit.get("end_time")
+        src = hit.get("source_index", "")
+        if ts is not None:
+            lines.append(f"- [{src}] {vid} at {ts:.1f}s")
+        elif st is not None and et is not None:
+            lines.append(f"- [{src}] {vid} from {st:.1f}s to {et:.1f}s")
+        else:
+            lines.append(f"- [{src}] {vid}")
 
     return "\n".join(lines)
 

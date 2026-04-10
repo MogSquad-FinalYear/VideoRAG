@@ -19,13 +19,35 @@ _device = "cpu"
 _label_embeddings = None
 
 _LABELS = [
-    "person", "man", "woman", "group of people", "face closeup", "crowd",
-    "car", "truck", "motorcycle", "bus", "street", "parking lot",
+    # People & identity
+    "person", "man", "woman", "child", "group of people", "face closeup",
+    "crowd", "pedestrian", "suspect", "bystander",
+    # Vehicles
+    "car", "truck", "motorcycle", "bicycle", "bike", "bus", "van",
+    "auto rickshaw", "scooter", "ambulance", "police car",
+    # Vehicle actions & events
+    "car accident", "vehicle collision", "car crash", "car hitting bike",
+    "car hitting motorcycle", "vehicle speeding", "traffic",
+    "vehicle parked", "vehicle driving on road",
+    # Locations & scenes
+    "street", "road", "highway", "intersection", "parking lot",
     "building", "office", "room", "corridor", "door", "window",
+    "sidewalk", "alley", "bridge", "tunnel",
+    # Objects
     "table", "chair", "bag", "backpack", "phone", "laptop",
+    "weapon", "knife", "gun", "blood", "evidence bag",
+    "helmet", "license plate", "sign", "traffic light",
+    # Sports & venues
     "sports field", "basketball court", "stadium", "scoreboard",
-    "outdoor daylight", "outdoor night", "indoor scene", "camera close shot",
-    "walking", "running", "talking", "holding object", "sitting", "standing",
+    # Actions & events
+    "walking", "running", "fighting", "arguing", "falling",
+    "hitting", "kicking", "punching", "chasing", "fleeing",
+    "talking", "holding object", "sitting", "standing",
+    "stealing", "breaking", "climbing", "jumping",
+    # Conditions
+    "outdoor daylight", "outdoor night", "indoor scene",
+    "rain", "fog", "camera close shot", "surveillance footage",
+    "cctv view", "dashcam view",
 ]
 
 
@@ -83,7 +105,11 @@ def _load_label_embeddings() -> np.ndarray:
 
 
 def _caption_batch_clip(image_paths: list[str]) -> list[str]:
-    """Generate fast pseudo-captions by matching frame embeddings to label prompts."""
+    """Generate fast pseudo-captions by matching frame embeddings to label prompts.
+
+    Uses top-3 matching labels with a lower threshold to produce richer,
+    more descriptive captions for better downstream retrieval.
+    """
     if not image_paths:
         return []
 
@@ -96,15 +122,17 @@ def _caption_batch_clip(image_paths: list[str]) -> list[str]:
     for emb, path in zip(img_emb, valid_paths):
         vec = np.array(emb, dtype=np.float32)
         sims = label_emb @ vec
-        top_idx = np.argsort(sims)[-2:][::-1]
-        top_labels = [_LABELS[i] for i in top_idx if sims[i] > 0.19]
+        top_idx = np.argsort(sims)[-3:][::-1]  # Top-3 labels
+        top_labels = [_LABELS[i] for i in top_idx if sims[i] > 0.16]
 
-        if len(top_labels) >= 2:
-            caption = f"scene with {top_labels[0]} and {top_labels[1]}"
+        if len(top_labels) >= 3:
+            caption = f"a scene showing {top_labels[0]}, {top_labels[1]}, and {top_labels[2]}"
+        elif len(top_labels) == 2:
+            caption = f"a scene showing {top_labels[0]} and {top_labels[1]}"
         elif len(top_labels) == 1:
-            caption = f"scene with {top_labels[0]}"
+            caption = f"a scene showing {top_labels[0]}"
         else:
-            caption = "scene in video"
+            caption = "unidentified scene in video"
 
         path_to_caption[path] = caption
 
