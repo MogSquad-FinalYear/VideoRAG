@@ -225,7 +225,7 @@ def _execute_tool(tool_name: str, args: dict) -> str:
                 query_embedding=image_embedding,
                 n=args.get("n", 10),
                 video_id=args.get("video_id"),
-                min_score=args.get("min_score", 0.25),
+                min_score=args.get("min_score", 0.35),
             )
             for r in results:
                 r["content"] = f"Visual match for uploaded reference image (similarity: {r.get('score', 0):.1%})."
@@ -285,7 +285,7 @@ def _collect_sources(query: str, video_id: str = None, image_path: str = None) -
             "image_path": image_path,
             "video_id": video_id,
             "n": 10,
-            "min_score": 0.25,
+            "min_score": 0.35,
         }))
         if isinstance(image_hits, list):
             sources.extend(image_hits)
@@ -463,6 +463,27 @@ def run_agent(query: str, video_id: str = None, image_path: str = None, conversa
 
     # Step 1: Collect raw search results
     sources, strategies = _collect_sources(query=query, video_id=video_id, image_path=image_path)
+
+    # ── Hard confidence gate for image search ──
+    # If this is an image search and NO result scored above 0.30,
+    # the uploaded image is NOT in the video. Return immediately.
+    if is_image_search:
+        best_score = max((s.get("score", 0) for s in sources), default=0) if sources else 0
+        if best_score < 0.30:
+            logger.info(f"Image search: best score {best_score:.3f} < 0.30 — no confident match.")
+            return {
+                "answer": (
+                    "### No Match Found\n\n"
+                    "The uploaded reference image does **not** match any frames in the video.\n\n"
+                    "This means the person or object in your image is **not present** in this footage.\n\n"
+                    "**Suggestions:**\n"
+                    "- Try a different reference image with better lighting or angle\n"
+                    "- Try a text description instead (e.g., \"person in red shirt\")\n"
+                    "- Upload a different video that may contain the subject"
+                ),
+                "clips": [],
+                "sources": [],
+            }
 
     # Step 2: Determine how many results to describe and return
     if is_image_search:
