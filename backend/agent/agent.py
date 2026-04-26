@@ -225,10 +225,10 @@ def _execute_tool(tool_name: str, args: dict) -> str:
                 query_embedding=image_embedding,
                 n=args.get("n", 10),
                 video_id=args.get("video_id"),
-                min_score=args.get("min_score", 0.12),
+                min_score=args.get("min_score", 0.25),
             )
             for r in results:
-                r["content"] = f"Visual match for uploaded reference image."
+                r["content"] = f"Visual match for uploaded reference image (similarity: {r.get('score', 0):.1%})."
             return json.dumps(results, indent=2)
 
         elif tool_name == "get_video_clip_info":
@@ -284,8 +284,8 @@ def _collect_sources(query: str, video_id: str = None, image_path: str = None) -
         image_hits = json.loads(_execute_tool("search_by_image", {
             "image_path": image_path,
             "video_id": video_id,
-            "n": 20,
-            "min_score": 0.10,
+            "n": 10,
+            "min_score": 0.25,
         }))
         if isinstance(image_hits, list):
             sources.extend(image_hits)
@@ -385,7 +385,20 @@ def _render_answer(query: str, sources: list[dict], strategies: list[str], video
     display_sources = sources[:max_display]
 
     if is_image_search:
+        # Check if any result has a strong confidence
+        best_score = max((s.get("score", 0) for s in display_sources), default=0)
+
+        if best_score < 0.25:
+            return ("### No Confident Match Found\n\n"
+                    "The uploaded reference image does **not** appear to match any frames in the video with sufficient confidence. "
+                    "This could mean:\n"
+                    "- The person/object in the reference image is not present in this video\n"
+                    "- The video angle or lighting is too different for visual matching\n\n"
+                    "Try uploading a clearer reference image or searching with a text description instead.")
+
         lines = ["### Image Search Results"]
+        if best_score < 0.35:
+            lines.append("⚠️ **Low confidence** — These matches are weak. The person/object may NOT actually be in the video.")
         lines.append(f"Found **{len(display_sources)}** visually similar frames using: {', '.join(sorted(set(strategies)))}")
         lines.append("")
 
@@ -395,13 +408,19 @@ def _render_answer(query: str, sources: list[dict], strategies: list[str], video
             desc = hit.get("description", hit.get("content", ""))
             score = hit.get("score", 0)
 
-            lines.append(f"**Match {i+1}** — Video `{vid}` at {time_str} (similarity: {score:.1%})")
+            confidence = "🟢 High" if score >= 0.50 else ("🟡 Medium" if score >= 0.35 else "🔴 Low")
+            lines.append(f"**Match {i+1}** — Video `{vid}` at {time_str} (similarity: {score:.1%}, {confidence})")
             if desc:
                 lines.append(f"- **Description**: {desc}")
             lines.append("")
 
         lines.append("### Summary")
-        lines.append(f"The uploaded reference image has potential visual matches at the timestamps above. Review the matched frames to confirm identity.")
+        if best_score >= 0.50:
+            lines.append("The uploaded reference image has **strong** visual matches at the timestamps above.")
+        elif best_score >= 0.35:
+            lines.append("The uploaded reference image has **possible** visual matches. Review the matched frames carefully to confirm identity.")
+        else:
+            lines.append("⚠️ The matches are **weak**. The uploaded image may not correspond to anyone/anything in this video. Manual verification is strongly recommended.")
     else:
         lines = [f"### Detailed Scene Analysis for: \"{query}\""]
         lines.append(f"Search strategy: {', '.join(sorted(set(strategies)))}")

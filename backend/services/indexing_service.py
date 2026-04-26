@@ -208,7 +208,7 @@ def index_transcripts(video_id: str, segments: list[dict]):
 
 
 # Minimum similarity thresholds — results below these are noise, not signal
-_IMAGE_MIN_SCORE = 0.12
+_IMAGE_MIN_SCORE = 0.22
 _CAPTION_MIN_SCORE = 0.15
 _SPEECH_MIN_SCORE = 0.10
 

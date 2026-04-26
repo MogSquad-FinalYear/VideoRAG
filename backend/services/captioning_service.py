@@ -107,7 +107,7 @@ def _load_label_embeddings() -> np.ndarray:
 def _caption_batch_clip(image_paths: list[str]) -> list[str]:
     """Generate fast pseudo-captions by matching frame embeddings to label prompts.
 
-    Uses top-3 matching labels with a lower threshold to produce richer,
+    Uses top-5 matching labels with a lower threshold to produce richer,
     more descriptive captions for better downstream retrieval.
     """
     if not image_paths:
@@ -118,21 +118,46 @@ def _caption_batch_clip(image_paths: list[str]) -> list[str]:
     if not img_emb:
         return ["" for _ in image_paths]
 
+    # Categorize labels for structured captions
+    _ACTION_LABELS = {
+        "walking", "running", "fighting", "arguing", "falling",
+        "hitting", "kicking", "punching", "chasing", "fleeing",
+        "talking", "holding object", "sitting", "standing",
+        "stealing", "breaking", "climbing", "jumping",
+    }
+    _EVENT_LABELS = {
+        "car accident", "vehicle collision", "car crash", "car hitting bike",
+        "car hitting motorcycle", "vehicle speeding",
+    }
+
     path_to_caption = {}
     for emb, path in zip(img_emb, valid_paths):
         vec = np.array(emb, dtype=np.float32)
         sims = label_emb @ vec
-        top_idx = np.argsort(sims)[-3:][::-1]  # Top-3 labels
-        top_labels = [_LABELS[i] for i in top_idx if sims[i] > 0.16]
+        top_idx = np.argsort(sims)[-5:][::-1]  # Top-5 labels
+        top_labels = [_LABELS[i] for i in top_idx if sims[i] > 0.14]
 
-        if len(top_labels) >= 3:
-            caption = f"a scene showing {top_labels[0]}, {top_labels[1]}, and {top_labels[2]}"
-        elif len(top_labels) == 2:
-            caption = f"a scene showing {top_labels[0]} and {top_labels[1]}"
-        elif len(top_labels) == 1:
-            caption = f"a scene showing {top_labels[0]}"
-        else:
-            caption = "unidentified scene in video"
+        if not top_labels:
+            path_to_caption[path] = "unidentified scene in video"
+            continue
+
+        # Separate into actions/events vs objects/scenes
+        actions = [l for l in top_labels if l in _ACTION_LABELS or l in _EVENT_LABELS]
+        objects = [l for l in top_labels if l not in _ACTION_LABELS and l not in _EVENT_LABELS]
+
+        parts = []
+        if actions and objects:
+            parts.append(f"{', '.join(objects)} with {', '.join(actions)}")
+        elif objects:
+            parts.append(', '.join(objects))
+        elif actions:
+            parts.append(', '.join(actions))
+
+        caption = f"a scene showing {' and '.join(parts)}" if parts else "unidentified scene"
+
+        # Add all detected labels as keywords for better keyword-based retrieval
+        all_keywords = ' '.join(top_labels)
+        caption = f"{caption}. Keywords: {all_keywords}"
 
         path_to_caption[path] = caption
 
