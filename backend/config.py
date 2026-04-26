@@ -46,7 +46,7 @@ FRAME_SAMPLE_FPS = float(os.getenv("FRAME_SAMPLE_FPS", "1"))
 MAX_FRAMES_PER_VIDEO = int(os.getenv("MAX_FRAMES_PER_VIDEO", "48"))
 CAPTION_STRIDE = int(os.getenv("CAPTION_STRIDE", "3"))
 CAPTION_MAX_FRAMES = int(os.getenv("CAPTION_MAX_FRAMES", "24"))
-CAPTION_MODE = os.getenv("CAPTION_MODE", "async").strip().lower()
+CAPTION_MODE = os.getenv("CAPTION_MODE", "sync").strip().lower()
 if CAPTION_MODE not in {"sync", "async", "off"}:
     CAPTION_MODE = "async"
 CAPTION_BACKEND = os.getenv("CAPTION_BACKEND", "clip").strip().lower()

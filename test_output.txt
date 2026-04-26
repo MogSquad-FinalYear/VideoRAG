@@ -1,0 +1,8 @@
+============================================================
+VideoRAG -- Strategy A & B Verification
+============================================================
+
+[1] Testing imports...
+   [OK] All imports successful
+
+[2] Checking index stats...

@@ -50,7 +50,7 @@ def _select_caption_frames(frame_paths: list[str]) -> list[str]:
     return selected
 
 
-def _generate_captions(video_id: str, frame_paths: list[str], valid_frame_paths: list[str]) -> int:
+def _generate_captions(video_id: str, frame_paths: list[str], valid_frame_paths: list[str], frame_interval_sec: float = 1.0) -> int:
     """Generate and index captions for selected key frames only."""
     try:
         caption_frame_paths = _select_caption_frames(frame_paths)
@@ -70,7 +70,7 @@ def _generate_captions(video_id: str, frame_paths: list[str], valid_frame_paths:
             if caption
         }
         aligned_captions = [caption_map.get(path, "") for path in valid_frame_paths]
-        indexing_service.index_captions(video_id, valid_frame_paths, aligned_captions, fps=FRAME_SAMPLE_FPS)
+        indexing_service.index_captions(video_id, valid_frame_paths, aligned_captions, frame_interval_sec=frame_interval_sec)
         return sum(1 for c in aligned_captions if c)
     except Exception as e:
         logger.exception("Caption generation failed for video %s: %s", video_id, e)
@@ -110,17 +110,22 @@ def _process_video(task_id: str, video_path: str, video_id: str):
         # Fix 8: embed_batch now returns (embeddings, valid_paths) — skip failed images
         _update_task(task_id, message=f"Generating visual embeddings for {len(frame_paths)} frames...", progress=current / total_steps)
         embeddings, valid_frame_paths = embedding_service.embed_batch(frame_paths)
-        indexing_service.index_frames(video_id, valid_frame_paths, embeddings, fps=FRAME_SAMPLE_FPS)
+
+        # Compute real time interval between consecutive frames
+        video_duration = metadata.get("duration", len(valid_frame_paths))
+        frame_interval_sec = video_duration / max(len(valid_frame_paths), 1)
+
+        indexing_service.index_frames(video_id, valid_frame_paths, embeddings, frame_interval_sec=frame_interval_sec)
         current += 1
 
         caption_count = 0
         if CAPTION_MODE == "sync":
-            caption_count = _generate_captions(video_id, frame_paths, valid_frame_paths)
+            caption_count = _generate_captions(video_id, frame_paths, valid_frame_paths, frame_interval_sec)
             current += 1
         elif CAPTION_MODE == "async":
             threading.Thread(
                 target=_generate_captions,
-                args=(video_id, frame_paths, valid_frame_paths),
+                args=(video_id, frame_paths, valid_frame_paths, frame_interval_sec),
                 daemon=True,
             ).start()
 

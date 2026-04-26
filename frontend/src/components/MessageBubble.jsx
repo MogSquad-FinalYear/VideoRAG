@@ -1,13 +1,13 @@
 /**
  * MessageBubble — Individual message display for user and AI messages.
- * Supports basic markdown rendering for AI responses.
+ * Supports markdown rendering, image results with descriptions, and source tags.
  */
 import './MessageBubble.css';
 import { useState } from 'react';
 
 /**
  * Simple markdown-to-HTML converter for AI messages.
- * Handles: newlines, **bold**, `code`, [timestamps], bullet lists.
+ * Handles: newlines, ### headings, **bold**, `code`, [timestamps], bullet lists.
  */
 function renderMarkdown(text) {
   if (!text) return '';
@@ -19,6 +19,12 @@ function renderMarkdown(text) {
 
   const lines = escaped.split('\n');
   const htmlLines = lines.map((line) => {
+    // Handle ### headings
+    const h3Match = line.match(/^###\s+(.+)/);
+    if (h3Match) {
+      return `<h4 class="msg__heading">${h3Match[1]}</h4>`;
+    }
+
     const withInline = line
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
       .replace(/`([^`]+)`/g, '<code>$1</code>')
@@ -97,39 +103,66 @@ export default function MessageBubble({ message, onClipClick }) {
           />
         )}
 
-        {/* Image Results - Primary Display (top 1-2 images) */}
+        {/* Image Results - Primary Display with Descriptions */}
         {validClips.length > 0 && (
           <div className="msg__image-results">
-            <div className="msg__image-gallery">
+            <div className="msg__image-results-label">
+              🖼️ Retrieved Frames ({validClips.length} match{validClips.length !== 1 ? 'es' : ''})
+            </div>
+            <div className="msg__image-cards">
               {validClips.slice(0, 2).map((clip, i) => (
                 <div
                   key={`${clip.video_id}-${clip.start_time}-${i}`}
-                  className="msg__image-item"
+                  className="msg__image-card"
                   onClick={() => onClipClick?.(clip)}
                 >
-                  <img
-                    src={clip.frame_paths[0]}
-                    alt={`Result ${i + 1}`}
-                    className="msg__result-image"
-                    onError={() => setBrokenThumbs((prev) => ({ ...prev, [clip.frame_paths[0]]: true }))}
-                  />
-                  <span className="msg__image-time">
-                    {formatTimestamp(clip.start_time)}
-                  </span>
+                  <div className="msg__image-card-visual">
+                    <img
+                      src={clip.frame_paths[0]}
+                      alt={`Result ${i + 1}`}
+                      className="msg__result-image"
+                      onError={() => setBrokenThumbs((prev) => ({ ...prev, [clip.frame_paths[0]]: true }))}
+                    />
+                    <span className="msg__image-time">
+                      {formatTimestamp(clip.start_time)}
+                    </span>
+                    <span className="msg__image-match-badge">
+                      Match {i + 1}
+                    </span>
+                  </div>
+                  {/* Description Panel */}
+                  {clip.description && (
+                    <div className="msg__image-card-desc">
+                      <span className="msg__image-card-desc-icon">📝</span>
+                      <p className="msg__image-card-desc-text">{clip.description}</p>
+                    </div>
+                  )}
+                  <div className="msg__image-card-meta">
+                    <span className="msg__image-card-vid">
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <rect x="2" y="4" width="20" height="16" rx="2" />
+                        <polygon points="10,8 10,16 16,12" />
+                      </svg>
+                      {clip.video_id}
+                    </span>
+                    <span className="msg__image-card-range">
+                      {formatTimestamp(clip.start_time)} – {formatTimestamp(clip.end_time)}
+                    </span>
+                  </div>
                 </div>
               ))}
             </div>
           </div>
         )}
 
-        {/* Source clips (additional results - shown if more than 2 clips exist) */}
+        {/* Additional results beyond top 2 */}
         {validClips.length > 2 && (
           <div className="msg__more-results">
             <button 
               className="msg__more-toggle"
               onClick={() => setShowMoreResults(!showMoreResults)}
             >
-              +{validClips.length - 2} More Results
+              {showMoreResults ? '▲ Hide' : '▼ Show'} {validClips.length - 2} More Result{validClips.length - 2 !== 1 ? 's' : ''}
             </button>
             <div className="msg__clips-grid" style={{ display: showMoreResults ? 'flex' : 'none' }}>
               {validClips.slice(2).map((clip, i) => (
@@ -149,6 +182,9 @@ export default function MessageBubble({ message, onClipClick }) {
                     <span className="msg__clip-time">
                       [{formatTimestamp(clip.start_time)} – {formatTimestamp(clip.end_time)}]
                     </span>
+                    {clip.description && (
+                      <span className="msg__clip-desc">{clip.description}</span>
+                    )}
                   </div>
                 </button>
               ))}

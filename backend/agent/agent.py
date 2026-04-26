@@ -1,12 +1,15 @@
 """
 VideoRAG — Groq-Powered Agent
-Agentic loop: receives query → LLM decides tools → execute → LLM answers.
+Agentic loop: receives query → retrieval → enrich with descriptions → LLM answers.
+
+Strategy A: Text-to-Video — returns top 2 matches with detailed BLIP descriptions
+Strategy B: Image-to-Video — finds visually similar frames and describes them
 """
 import json
 import logging
-from groq import Groq
+from pathlib import Path
 
-from backend.config import GROQ_API_KEY, GROQ_MODEL, FRAMES_DIR, ENABLE_LLM_POLISH
+from backend.config import GROQ_API_KEY, GROQ_MODEL, FRAMES_DIR
 from backend.agent.tools import TOOL_DEFINITIONS
 from backend.services import indexing_service, embedding_service
 
@@ -27,11 +30,12 @@ def _expand_visual_query(query: str) -> str:
         return query
     return f"{query}. Related visual concepts: {'; '.join(expansions)}"
 
-# ── Singleton Groq client (Fix 7) ────────────────────────────────────────────
+
+# ── Singleton Groq client ────────────────────────────────────────────────────
 _groq_client = None
 
 
-def _get_groq_client() -> Groq:
+def _get_groq_client():
     """Return a singleton Groq client instance."""
     global _groq_client
     if _groq_client is None:
@@ -40,42 +44,133 @@ def _get_groq_client() -> Groq:
                 "GROQ_API_KEY is not set. Please add it to your .env file. "
                 "Get a free key at https://console.groq.com"
             )
+        from groq import Groq
         _groq_client = Groq(api_key=GROQ_API_KEY)
         logger.info("Groq client initialized.")
     return _groq_client
 
 
-# ── System Prompt (Fix 16) ───────────────────────────────────────────────────
+# ── Frame path resolution ────────────────────────────────────────────────────
+
+def _url_to_fs_path(frame_url: str) -> str | None:
+    """Convert a browser URL like /frames/vid123/frame_000007.jpg to filesystem path."""
+    if not frame_url:
+        return None
+    try:
+        # /frames/{video_id}/{frame_name} → FRAMES_DIR / video_id / frame_name
+        parts = frame_url.strip("/").split("/")
+        if len(parts) >= 3 and parts[0] == "frames":
+            video_id = parts[1]
+            frame_name = parts[2]
+            fs_path = FRAMES_DIR / video_id / frame_name
+            if fs_path.exists():
+                return str(fs_path)
+    except Exception:
+        pass
+    return None
+
+
+def _enrich_with_descriptions(sources: list[dict], max_describe: int = 2) -> list[dict]:
+    """Enrich the top N search results with detailed descriptions.
+
+    Strategy (fast-first, memory-safe):
+    1. If source already has a meaningful 'content' (from caption index), use it.
+    2. Otherwise, look up stored caption from the caption index for that frame.
+    3. Try CLIP-based label description (fast, always available since CLIP is loaded).
+    4. Try BLIP on-demand (last resort, memory-intensive).
+    5. Fallback: generate from metadata.
+    """
+    described = 0
+    for src in sources:
+        if described >= max_describe:
+            break
+
+        video_id = src.get("video_id", "")
+        frame_number = src.get("frame_number")
+        frame_path = src.get("frame_path", "")
+        existing_content = src.get("content", "")
+
+        # ── Step 1: If this came from caption index, it already has a caption ──
+        is_generic = (
+            not existing_content
+            or "Visual similarity match" in existing_content
+            or "Visual match for" in existing_content
+        )
+
+        if not is_generic and existing_content:
+            src["description"] = existing_content
+            described += 1
+            continue
+
+        # ── Step 2: Look up stored caption from caption index (fast) ──────────
+        if video_id and frame_number is not None:
+            stored_caption = indexing_service.get_caption_for_frame(video_id, frame_number)
+            if stored_caption:
+                src["description"] = stored_caption
+                src["content"] = stored_caption
+                described += 1
+                continue
+
+        # ── Step 3: CLIP-based label description (fast, reliable) ─────────────
+        fs_path = _url_to_fs_path(frame_path)
+        if fs_path:
+            try:
+                from backend.services.captioning_service import describe_frame_clip
+                clip_desc = describe_frame_clip(fs_path)
+                if clip_desc and len(clip_desc) > 20:
+                    src["description"] = clip_desc
+                    src["content"] = clip_desc
+                    described += 1
+                    continue
+            except Exception as e:
+                logger.warning(f"CLIP description failed for {fs_path}: {e}")
+
+        # ── Step 4: Try BLIP on-demand (memory-intensive) ─────────────────────
+        if fs_path:
+            try:
+                from backend.services.captioning_service import describe_frame_detailed
+                detailed = describe_frame_detailed(fs_path)
+                if detailed:
+                    src["description"] = detailed
+                    src["content"] = detailed
+                    described += 1
+                    continue
+            except (MemoryError, OSError) as e:
+                logger.warning(f"BLIP skipped (memory): {e}")
+            except Exception as e:
+                logger.warning(f"BLIP description failed for {fs_path}: {e}")
+
+        # ── Step 5: Fallback — generate from metadata ─────────────────────────
+        ts = src.get("timestamp")
+        if ts is not None:
+            minutes = int(ts) // 60
+            seconds = int(ts) % 60
+            src["description"] = f"Frame captured at [{minutes:02d}:{seconds:02d}] in video {video_id}. Visual content could not be described automatically."
+        elif frame_number is not None:
+            src["description"] = f"Frame #{frame_number} in video {video_id}. Visual content could not be described automatically."
+        else:
+            src["description"] = f"Matched frame from video {video_id}."
+        described += 1
+
+    return sources
+
+
+# ── System Prompt ────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are **Kubrick**, a forensic video analysis AI assistant. You help investigators search and analyze evidence videos.
 
 You have access to a multimodal video retrieval system with 3 indexes:
-1. **Caption Index** — Short scene descriptions of each frame (can be generic/inaccurate)
+1. **Caption Index** — Short scene descriptions of each frame
 2. **Image Index** — CLIP visual embeddings of each frame (best for finding specific people, objects, appearances)
 3. **Speech Index** — Transcribed speech/dialogue from the video
 
-## Query Strategy — FOLLOW STRICTLY
-- For questions about **specific people, characters, or visual appearances**: Use `search_by_visual_similarity` as PRIMARY. The caption index has generic descriptions that often miss specific identities.
-- For questions about **general scenes or activities**: Use `search_by_caption`.
-- For questions about **spoken words or dialogue**: Use `search_transcripts`.
-- **ALWAYS call at least 2 different search tools** for any question about video content. Cross-reference results from visual similarity AND captions for the most accurate answer.
-
-## IMAGE-BASED SEARCH
-When the user uploads a reference image:
-- The system has ALREADY performed visual similarity search using the image's CLIP embedding.
-- The search results you receive include frames that visually resemble the uploaded image.
-- Your job is to **analyze the results**, identify who/what appears in the matching frames, and give a clear answer.
-- Describe what you see: who the person is (if identifiable), what they're doing, and when they appear.
-- Report ALL occurrences — don't stop at the first match.
-
 ## CRITICAL RULES
-1. You MUST call search tools before answering. NEVER answer from assumptions.
-2. ALWAYS use `search_by_visual_similarity` when the question is about a person, character, or specific object.
-3. For every search, set n=10 or higher to find ALL occurrences.
-4. **Only report frames where you are confident about the match.** If the caption or visual match seems generic or unrelated, EXCLUDE it. Quality over quantity.
-5. Report ALL matching timestamps as [MM:SS] format.
-6. Each frame is sampled at 1fps, so frame_number N = timestamp N seconds.
-7. When results from different tools disagree, prefer the visual similarity results for appearance questions.
-8. Group consecutive matching timestamps into ranges (e.g., [00:11] to [00:15]) instead of listing each second."""
+1. You are given pre-retrieved search results. Analyze them and provide a clear, professional answer.
+2. Frame descriptions are AI-generated — report them as observations, not certainties.
+3. Report timestamps in [MM:SS] format. Each frame_number N = timestamp N seconds.
+4. Group consecutive matching timestamps into ranges (e.g., [00:11] to [00:15]).
+5. Be specific about WHAT you see in each matched frame based on the provided descriptions.
+6. Always describe the visual content — colors, objects, people, actions visible in the frame.
+7. Keep responses focused and professional."""
 
 
 def _execute_tool(tool_name: str, args: dict) -> str:
@@ -130,7 +225,7 @@ def _execute_tool(tool_name: str, args: dict) -> str:
                 query_embedding=image_embedding,
                 n=args.get("n", 10),
                 video_id=args.get("video_id"),
-                min_score=args.get("min_score", 0.22),
+                min_score=args.get("min_score", 0.12),
             )
             for r in results:
                 r["content"] = f"Visual match for uploaded reference image."
@@ -147,7 +242,6 @@ def _execute_tool(tool_name: str, args: dict) -> str:
             frame_files = sorted(frames_dir.glob("frame_*.jpg"))
             clip_frames = []
             for f in frame_files:
-                # Extract frame number from filename
                 num = int(f.stem.split("_")[1])
                 timestamp = num  # 1 FPS assumed
                 if start_time <= timestamp <= end_time:
@@ -170,90 +264,6 @@ def _execute_tool(tool_name: str, args: dict) -> str:
         return json.dumps({"error": str(e)})
 
 
-def _build_local_answer(query: str, video_id: str = None, image_path: str = None) -> dict:
-    """Fallback retrieval path when the LLM is unavailable."""
-    query_lower = query.lower()
-    sources = []
-
-    if image_path:
-        sources.extend(json.loads(_execute_tool("search_by_image", {
-            "image_path": image_path,
-            "video_id": video_id,
-            "n": 10,
-        })))
-
-    if any(keyword in query_lower for keyword in ["said", "say", "spoken", "tell", "audio", "voice", "witness", "mention", "mentioned"]):
-        sources.extend(json.loads(_execute_tool("search_transcripts", {
-            "query": query,
-            "video_id": video_id,
-            "n": 10,
-        })))
-    elif any(keyword in query_lower for keyword in ["person", "man", "woman", "car", "vehicle", "object", "bag", "weapon", "blue", "red", "green", "shirt", "jacket", "face"]):
-        sources.extend(json.loads(_execute_tool("search_by_visual_similarity", {
-            "query": query,
-            "video_id": video_id,
-            "n": 10,
-        })))
-        sources.extend(json.loads(_execute_tool("search_by_caption", {
-            "query": query,
-            "video_id": video_id,
-            "n": 10,
-        })))
-    else:
-        sources.extend(json.loads(_execute_tool("search_by_caption", {
-            "query": query,
-            "video_id": video_id,
-            "n": 10,
-        })))
-        sources.extend(json.loads(_execute_tool("search_by_visual_similarity", {
-            "query": query,
-            "video_id": video_id,
-            "n": 10,
-        })))
-
-    deduped = []
-    seen = set()
-    for src in sources:
-        key = (
-            src.get("video_id"),
-            src.get("frame_number"),
-            src.get("timestamp"),
-            src.get("start_time"),
-            src.get("end_time"),
-            src.get("content"),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(src)
-
-    top_hits = deduped[:5]
-    if not top_hits:
-        return {
-            "answer": "I could not find matching evidence in the current indexes.",
-            "clips": [],
-            "sources": [],
-        }
-
-    summary_lines = ["I found the following relevant evidence:"]
-    for hit in top_hits:
-        timestamp = hit.get("timestamp")
-        start_time = hit.get("start_time")
-        end_time = hit.get("end_time")
-        if timestamp is not None:
-            summary_lines.append(f"- {hit.get('video_id')} at {timestamp:.0f}s")
-        elif start_time is not None and end_time is not None:
-            summary_lines.append(f"- {hit.get('video_id')} from {start_time:.0f}s to {end_time:.0f}s")
-        else:
-            summary_lines.append(f"- {hit.get('video_id')}")
-
-    return {
-        "answer": "\n".join(summary_lines),
-        "clips": _build_clips(deduped),
-        "sources": deduped[:20],
-    }
-
-
 def _is_speech_query(query: str) -> bool:
     q = query.lower()
     speech_terms = [
@@ -269,17 +279,18 @@ def _collect_sources(query: str, video_id: str = None, image_path: str = None) -
     used_strategies: list[str] = []
 
     if image_path:
+        # ── Strategy B: Image-to-Video Search ────────────────────────────
         used_strategies.append("image-to-video")
         image_hits = json.loads(_execute_tool("search_by_image", {
             "image_path": image_path,
             "video_id": video_id,
-            "n": 15,  # Boost for image search — we want all occurrences
-            "min_score": 0.22,
+            "n": 20,
+            "min_score": 0.10,
         }))
         if isinstance(image_hits, list):
             sources.extend(image_hits)
 
-        # Also run text-based visual similarity using the query for cross-referencing
+        # Cross-reference with text if user provided a meaningful query
         if query and query.strip().lower() not in ("find frames similar to this image", ""):
             used_strategies.append("text-to-video (cross-ref)")
             text_visual_hits = json.loads(_execute_tool("search_by_visual_similarity", {
@@ -291,6 +302,7 @@ def _collect_sources(query: str, video_id: str = None, image_path: str = None) -
                 sources.extend(text_visual_hits)
 
     elif _is_speech_query(query):
+        # ── Audio/Transcript Search ──────────────────────────────────────
         used_strategies.append("audio/transcript")
         speech_hits = json.loads(_execute_tool("search_transcripts", {
             "query": query,
@@ -308,6 +320,7 @@ def _collect_sources(query: str, video_id: str = None, image_path: str = None) -
         if isinstance(caption_hits, list):
             sources.extend(caption_hits)
     else:
+        # ── Strategy A: Text-to-Video Search ─────────────────────────────
         used_strategies.append("text-to-video")
         caption_hits = json.loads(_execute_tool("search_by_caption", {
             "query": query,
@@ -325,7 +338,7 @@ def _collect_sources(query: str, video_id: str = None, image_path: str = None) -
         if isinstance(visual_hits, list):
             sources.extend(visual_hits)
 
-    deduped: list[dict] = []
+    # Deduplicate: keep best score per unique (video_id, frame_number/timestamp)
     best_by_key = {}
     for src in sources:
         key = (src.get("video_id"), src.get("frame_number"), src.get("timestamp"), src.get("start_time"), src.get("end_time"))
@@ -335,6 +348,7 @@ def _collect_sources(query: str, video_id: str = None, image_path: str = None) -
 
     deduped = list(best_by_key.values())
 
+    # Boost image index results for image-to-video queries
     source_boost = {"image": 0.12, "caption": 0.06, "speech": 0.03}
     deduped.sort(
         key=lambda item: item.get("score", 0) + (source_boost.get(item.get("source_index", ""), 0.0) if image_path else 0.0),
@@ -343,41 +357,116 @@ def _collect_sources(query: str, video_id: str = None, image_path: str = None) -
     return deduped, used_strategies
 
 
-def _render_answer(query: str, sources: list[dict], strategies: list[str], video_id: str = None) -> str:
+def _format_timestamp(hit: dict) -> str:
+    """Format a hit's timestamp into [MM:SS] string."""
+    ts = hit.get("timestamp")
+    if ts is not None:
+        minutes = int(ts) // 60
+        seconds = int(ts) % 60
+        return f"[{minutes:02d}:{seconds:02d}]"
+    st = hit.get("start_time")
+    et = hit.get("end_time")
+    if st is not None and et is not None:
+        return f"[{int(st)//60:02d}:{int(st)%60:02d} – {int(et)//60:02d}:{int(et)%60:02d}]"
+    return "[unknown]"
+
+
+def _render_answer(query: str, sources: list[dict], strategies: list[str], video_id: str = None, is_image_search: bool = False) -> str:
+    """Build a readable text answer from search results.
+
+    This is the fallback when the LLM is unavailable. It produces a
+    structured response with detailed descriptions for each match.
+    """
     if not sources:
         scope = f" in video {video_id}" if video_id else ""
         return f"I could not find strong evidence matches for this query{scope}. Try a more specific object, person, or spoken phrase."
 
-    lines = [f"Found evidence using: {', '.join(sorted(set(strategies)))}"]
-    for hit in sources[:5]:
-        vid = hit.get("video_id", "")
-        ts = hit.get("timestamp")
-        st = hit.get("start_time")
-        et = hit.get("end_time")
-        src = hit.get("source_index", "")
-        if ts is not None:
-            lines.append(f"- [{src}] {vid} at {ts:.1f}s")
-        elif st is not None and et is not None:
-            lines.append(f"- [{src}] {vid} from {st:.1f}s to {et:.1f}s")
-        else:
-            lines.append(f"- [{src}] {vid}")
+    max_display = 5 if is_image_search else 2
+    display_sources = sources[:max_display]
+
+    if is_image_search:
+        lines = ["### Image Search Results"]
+        lines.append(f"Found **{len(display_sources)}** visually similar frames using: {', '.join(sorted(set(strategies)))}")
+        lines.append("")
+
+        for i, hit in enumerate(display_sources):
+            vid = hit.get("video_id", "")
+            time_str = _format_timestamp(hit)
+            desc = hit.get("description", hit.get("content", ""))
+            score = hit.get("score", 0)
+
+            lines.append(f"**Match {i+1}** — Video `{vid}` at {time_str} (similarity: {score:.1%})")
+            if desc:
+                lines.append(f"- **Description**: {desc}")
+            lines.append("")
+
+        lines.append("### Summary")
+        lines.append(f"The uploaded reference image has potential visual matches at the timestamps above. Review the matched frames to confirm identity.")
+    else:
+        lines = [f"### Detailed Scene Analysis for: \"{query}\""]
+        lines.append(f"Search strategy: {', '.join(sorted(set(strategies)))}")
+        lines.append("")
+
+        for i, hit in enumerate(display_sources):
+            vid = hit.get("video_id", "")
+            time_str = _format_timestamp(hit)
+            desc = hit.get("description", hit.get("content", ""))
+            score = hit.get("score", 0)
+            source_idx = hit.get("source_index", "")
+
+            lines.append(f"### Match {i+1}")
+            lines.append(f"- **Timestamp**: {time_str} in video `{vid}`")
+            lines.append(f"- **Confidence**: {score:.1%} ({source_idx} index)")
+            if desc:
+                lines.append(f"- **Description**: {desc}")
+            else:
+                lines.append(f"- **Description**: Frame matched by visual similarity but no detailed description available.")
+            lines.append("")
+
+        lines.append("### Summary")
+        lines.append(f"Found **{len(display_sources)}** relevant matches for \"{query}\". Review the matched frames above for forensic analysis.")
 
     return "\n".join(lines)
 
 
 def run_agent(query: str, video_id: str = None, image_path: str = None, conversation_history: list = None) -> dict:
     """
-    Run the agentic loop:
-    1. Send query + tools to Groq
-    2. If tool_calls → execute → send results back
-    3. Return final answer with sources
+    Run the agentic retrieval pipeline:
+    1. Collect sources via multimodal search
+    2. Enrich top results with detailed BLIP descriptions
+    3. Send to LLM for professional answer
+    4. Return answer + clips with descriptions
+
+    Strategy A (text search): Returns top 2 matches with detailed descriptions
+    Strategy B (image search): Returns all matches with descriptions
     """
+    is_image_search = image_path is not None
+
+    # Step 1: Collect raw search results
     sources, strategies = _collect_sources(query=query, video_id=video_id, image_path=image_path)
-    
+
+    # Step 2: Determine how many results to describe and return
+    if is_image_search:
+        max_results = 5  # Show more for image search
+        max_describe = 3
+    else:
+        max_results = 2  # Strategy A: top 2 only
+        max_describe = 2
+
+    # Limit sources to max_results
+    sources = sources[:max_results]
+
+    # Step 3: Enrich top results with detailed BLIP descriptions
+    if sources:
+        logger.info(f"Enriching top {min(max_describe, len(sources))} results with BLIP descriptions...")
+        sources = _enrich_with_descriptions(sources, max_describe=max_describe)
+
+    # Step 4: Try LLM for polished answer
     answer = None
     if GROQ_API_KEY and sources:
         try:
             client = _get_groq_client()
+
             compact_sources = [
                 {
                     "video_id": s.get("video_id"),
@@ -385,39 +474,50 @@ def run_agent(query: str, video_id: str = None, image_path: str = None, conversa
                     "start_time": s.get("start_time"),
                     "end_time": s.get("end_time"),
                     "source_index": s.get("source_index"),
-                    "content": s.get("content", "")[:120],
+                    "description": s.get("description", s.get("content", "")),
                     "score": round(s.get("score", 0), 3),
+                    "frame_number": s.get("frame_number"),
                 }
-                for s in sources[:10]
+                for s in sources
             ]
 
-            if image_path:
+            if is_image_search:
                 task_prompt = (
                     "The user uploaded a reference image and provided this query: "
                     f"'{query}'.\n\n"
-                    "Based on the visual match search results below, provide a professional, structured forensic analysis report.\n"
+                    "Based on the visual match search results below, provide a professional forensic analysis.\n"
                     "Your response MUST be structured exactly like this:\n\n"
                     "### Findings\n"
-                    "- State clearly if the person or object in the reference image appears in the video.\n"
-                    "- Describe what they are doing or the context of their appearance based on the search results.\n\n"
+                    "- State clearly whether the person/object from the reference image appears in the video.\n"
+                    "- For EACH matched frame: state the timestamp [MM:SS], describe what is visible (people, objects, colors, actions).\n"
+                    "- If the frame description mentions specific items (car, person, weapon), reference them explicitly.\n\n"
                     "### Confirmed Timestamps\n"
-                    "- List the exact timestamps where they appear, using [MM:SS] format.\n"
-                    "- Group consecutive timestamps into ranges (e.g., [00:11] to [00:15]).\n\n"
-                    "Be highly specific, confident, and professional. Do NOT rely on prior assumptions, only use the search results. Do NOT ask follow-up questions.\n"
+                    "- List ALL timestamps where the match appears in [MM:SS] format.\n"
+                    "- Group consecutive timestamps into ranges (e.g., [00:05] to [00:08]).\n\n"
+                    "### Summary\n"
+                    "- State the confidence level (high/medium/low) based on similarity scores.\n"
+                    "- Recommend next steps if needed.\n\n"
+                    "Be specific and professional. Base your descriptions on the frame descriptions provided, not assumptions.\n"
                     f"Search results: {json.dumps(compact_sources)}"
                 )
             else:
                 task_prompt = (
-                    "Based on the following video search results, provide a professional, structured forensic analysis report in response to the user's query.\n"
+                    f"User asked: \"{query}\"\n\n"
+                    "Based on the TOP 2 video search results below, provide a detailed forensic analysis.\n"
                     "Your response MUST be structured exactly like this:\n\n"
-                    "### Analysis\n"
-                    "- Provide a direct answer to the user's question.\n"
-                    "- Summarize the key events, spoken words, or visual evidence found.\n\n"
-                    "### Evidence Timestamps\n"
-                    "- List the specific times where the evidence occurs using [MM:SS] format.\n"
-                    "- Group consecutive hits into ranges (e.g., [00:11] to [00:15]).\n\n"
-                    "Be highly specific, confident, and professional. Do NOT rely on prior assumptions, only use the search results. Do NOT ask follow-up questions.\n"
-                    f"Query: {query}\n"
+                    "### Match 1\n"
+                    "- **Timestamp**: [MM:SS]\n"
+                    "- **Description**: Describe IN DETAIL what is visible in this frame. "
+                    "Use the frame description provided to mention specific items: colors of objects, types of vehicles, "
+                    "what people are doing, whether the scene is indoors/outdoors, lighting conditions, and any forensic-relevant details.\n\n"
+                    "### Match 2\n"
+                    "- **Timestamp**: [MM:SS]\n"
+                    "- **Description**: Same level of detail for the second match. "
+                    "Highlight what makes this frame DIFFERENT from Match 1.\n\n"
+                    "### Summary\n"
+                    "- Directly answer the user's question based on the evidence from both matches.\n"
+                    "- State confidence level (high/medium/low).\n\n"
+                    "IMPORTANT: Use the frame descriptions provided — do NOT fabricate details not mentioned in the data.\n"
                     f"Search results: {json.dumps(compact_sources)}"
                 )
 
@@ -428,7 +528,7 @@ def run_agent(query: str, video_id: str = None, image_path: str = None, conversa
                     {"role": "user", "content": task_prompt}
                 ],
                 temperature=0.1,
-                max_tokens=600,
+                max_tokens=800,
             )
             text = polished.choices[0].message.content
             if text:
@@ -437,17 +537,17 @@ def run_agent(query: str, video_id: str = None, image_path: str = None, conversa
             logger.warning(f"Answer generation error: {e}")
 
     if not answer:
-        answer = _render_answer(query, sources, strategies, video_id)
+        answer = _render_answer(query, sources, strategies, video_id, is_image_search)
 
     return {
         "answer": answer,
-        "clips": _build_clips(sources),
-        "sources": sources[:20],
+        "clips": _build_clips(sources, max_clips=max_results),
+        "sources": sources,
     }
 
 
-def _build_clips(all_sources: list) -> list:
-    """Build deduplicated clip list from search sources with temporally merged bounds."""
+def _build_clips(all_sources: list, max_clips: int = 5) -> list:
+    """Build deduplicated clip list from search sources with descriptions."""
     clips = []
 
     def _frame_exists(video_id: str, frame_path: str) -> bool:
@@ -462,26 +562,30 @@ def _build_clips(all_sources: list) -> list:
         vid = src.get("video_id", "")
         ts = float(src.get("timestamp") or src.get("start_time") or 0.0)
         frame_path = src.get("frame_path", "")
-        
+        description = src.get("description", src.get("content", ""))
+
         if vid and _frame_exists(vid, frame_path):
             merged = False
             for clip in clips:
-                # Merge clips that are close to each other (e.g., within 4 seconds)
+                # Merge clips that are close to each other (within 4 seconds)
                 if clip["video_id"] == vid and abs(clip["start_time"] - ts) <= 4.0:
                     clip["start_time"] = min(clip["start_time"], ts)
                     clip["end_time"] = max(clip["end_time"], ts + 2.0)
                     if frame_path not in clip["frame_paths"]:
                         clip["frame_paths"].append(frame_path)
+                    # Keep the best description
+                    if description and len(description) > len(clip.get("description", "")):
+                        clip["description"] = description
                     merged = True
                     break
-                    
+
             if not merged:
                 clips.append({
                     "video_id": vid,
                     "start_time": ts,
                     "end_time": float(src.get("end_time", ts + 2.0)),
                     "frame_paths": [frame_path] if frame_path else [],
-                    "description": src.get("content", ""),
+                    "description": description,
                 })
-                
-    return clips[:5]  # Limit to 5 clips to avoid UI spam
+
+    return clips[:max_clips]

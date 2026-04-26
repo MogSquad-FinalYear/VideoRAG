@@ -46,13 +46,6 @@ async def chat(request: ChatRequest):
     if not request.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
 
-    # Validate API key
-    if not GROQ_API_KEY:
-        raise HTTPException(
-            status_code=503,
-            detail="GROQ_API_KEY is not configured. Please add it to your .env file."
-        )
-
     logger.info(f"Chat query: '{request.query}' (video_id={request.video_id})")
 
     result = run_agent(

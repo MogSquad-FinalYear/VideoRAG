@@ -93,8 +93,16 @@ def get_collections():
     return _image_col, _caption_col, _speech_col
 
 
-def index_frames(video_id: str, frame_paths: list[str], embeddings: list[list[float]], fps: float = 1.0):
-    """Index frame CLIP embeddings into the image collection."""
+def index_frames(video_id: str, frame_paths: list[str], embeddings: list[list[float]], frame_interval_sec: float = 1.0):
+    """Index frame CLIP embeddings into the image collection.
+    
+    Args:
+        video_id: The video identifier.
+        frame_paths: List of frame file paths.
+        embeddings: CLIP embeddings for each frame.
+        frame_interval_sec: Actual seconds between consecutive extracted frames.
+            E.g., if 48 frames were extracted from a 79s video, this is ~1.65.
+    """
     get_chroma_client()
     if len(frame_paths) != len(embeddings):
         raise ValueError(
@@ -111,7 +119,7 @@ def index_frames(video_id: str, frame_paths: list[str], embeddings: list[list[fl
         metadatas.append({
             "video_id": video_id,
             "frame_number": frame_number,
-            "timestamp": round(frame_number / fps, 2),
+            "timestamp": round(frame_number * frame_interval_sec, 2),
             "frame_path": _to_url_path(path, video_id),  # Store as relative URL
         })
 
@@ -127,7 +135,7 @@ def index_frames(video_id: str, frame_paths: list[str], embeddings: list[list[fl
     logger.info(f"Indexed {len(ids)} frames for video {video_id}")
 
 
-def index_captions(video_id: str, frame_paths: list[str], captions: list[str], fps: float = 1.0):
+def index_captions(video_id: str, frame_paths: list[str], captions: list[str], frame_interval_sec: float = 1.0):
     """Index captions into the caption collection using local CLIP text embeddings."""
     get_chroma_client()
     ids = []
@@ -144,7 +152,7 @@ def index_captions(video_id: str, frame_paths: list[str], captions: list[str], f
         metadatas.append({
             "video_id": video_id,
             "frame_number": frame_number,
-            "timestamp": round(frame_number / fps, 2),
+            "timestamp": round(frame_number * frame_interval_sec, 2),
             "frame_path": _to_url_path(path, video_id),
         })
 
@@ -200,7 +208,7 @@ def index_transcripts(video_id: str, segments: list[dict]):
 
 
 # Minimum similarity thresholds — results below these are noise, not signal
-_IMAGE_MIN_SCORE = 0.15
+_IMAGE_MIN_SCORE = 0.12
 _CAPTION_MIN_SCORE = 0.15
 _SPEECH_MIN_SCORE = 0.10
 
@@ -441,3 +449,21 @@ def delete_video_from_indexes(video_id: str):
                 col.delete(ids=existing["ids"])
         except Exception as e:
             logger.warning(f"Error deleting video {video_id} from {col.name}: {e}")
+
+
+def get_caption_for_frame(video_id: str, frame_number: int) -> str:
+    """Retrieve stored caption for a specific frame from the caption index.
+
+    Used to enrich image search results (which don't have text) with
+    the caption that was generated during video processing.
+    """
+    get_chroma_client()
+    doc_id = f"{video_id}_caption_{frame_number}"
+    try:
+        result = _caption_col.get(ids=[doc_id], include=["documents"])
+        if result and result["documents"] and result["documents"][0]:
+            return result["documents"][0]
+    except Exception:
+        pass
+    return ""
+
