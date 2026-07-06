@@ -1,12 +1,12 @@
 """
 VideoRAG — ChromaDB Indexing Service
-Manages 3 vector collections: image (CLIP), caption (BLIP), speech (Whisper).
+Manages 4 vector collections: image (CLIP), caption (BLIP), speech (Whisper), OCR (EasyOCR).
 """
 import logging
 from pathlib import Path
 import chromadb
 
-from backend.config import CHROMADB_DIR, IMAGE_COLLECTION, CAPTION_COLLECTION, SPEECH_COLLECTION, FRAMES_DIR
+from backend.config import CHROMADB_DIR, IMAGE_COLLECTION, CAPTION_COLLECTION, SPEECH_COLLECTION, OCR_COLLECTION, FRAMES_DIR
 from backend.services import embedding_service
 
 logger = logging.getLogger(__name__)
@@ -15,6 +15,7 @@ _chroma_client = None
 _image_col = None
 _caption_col = None
 _speech_col = None
+_ocr_col = None
 
 
 def _extract_frame_number(frame_path: str) -> int | None:
@@ -63,7 +64,7 @@ def _frame_url_exists(frame_path: str, video_id: str) -> bool:
 
 def get_chroma_client():
     """Initialize ChromaDB persistent client."""
-    global _chroma_client, _image_col, _caption_col, _speech_col
+    global _chroma_client, _image_col, _caption_col, _speech_col, _ocr_col
     if _chroma_client is not None:
         return _chroma_client
 
@@ -82,26 +83,30 @@ def get_chroma_client():
         name=SPEECH_COLLECTION,
         metadata={"hnsw:space": "cosine"}
     )
+    _ocr_col = _chroma_client.get_or_create_collection(
+        name=OCR_COLLECTION,
+        metadata={"hnsw:space": "cosine"}
+    )
 
-    logger.info("ChromaDB collections ready.")
+    logger.info("ChromaDB collections ready (image, caption, speech, ocr).")
     return _chroma_client
 
 
 def get_collections():
-    """Return the 3 collections, initializing if needed."""
+    """Return the collections, initializing if needed."""
     get_chroma_client()
     return _image_col, _caption_col, _speech_col
 
 
-def index_frames(video_id: str, frame_paths: list[str], embeddings: list[list[float]], frame_interval_sec: float = 1.0):
+def index_frames(video_id: str, frame_paths: list[str], embeddings: list[list[float]], timestamps: list[float] = None):
     """Index frame CLIP embeddings into the image collection.
     
     Args:
         video_id: The video identifier.
         frame_paths: List of frame file paths.
         embeddings: CLIP embeddings for each frame.
-        frame_interval_sec: Actual seconds between consecutive extracted frames.
-            E.g., if 48 frames were extracted from a 79s video, this is ~1.65.
+        timestamps: Pre-computed real timestamps (seconds) for each frame.
+            If None, falls back to frame_number as timestamp (1 FPS assumption).
     """
     get_chroma_client()
     if len(frame_paths) != len(embeddings):
@@ -116,10 +121,12 @@ def index_frames(video_id: str, frame_paths: list[str], embeddings: list[list[fl
             frame_number = i
         frame_id = f"{video_id}_frame_{frame_number}"
         ids.append(frame_id)
+        # Bug #1 fix: use pre-computed real timestamp instead of frame_number * interval
+        ts = timestamps[i] if timestamps and i < len(timestamps) else float(frame_number)
         metadatas.append({
             "video_id": video_id,
             "frame_number": frame_number,
-            "timestamp": round(frame_number * frame_interval_sec, 2),
+            "timestamp": round(ts, 2),
             "frame_path": _to_url_path(path, video_id),  # Store as relative URL
         })
 
@@ -135,7 +142,7 @@ def index_frames(video_id: str, frame_paths: list[str], embeddings: list[list[fl
     logger.info(f"Indexed {len(ids)} frames for video {video_id}")
 
 
-def index_captions(video_id: str, frame_paths: list[str], captions: list[str], frame_interval_sec: float = 1.0):
+def index_captions(video_id: str, frame_paths: list[str], captions: list[str], timestamps: list[float] = None):
     """Index captions into the caption collection using local CLIP text embeddings."""
     get_chroma_client()
     ids = []
@@ -149,10 +156,12 @@ def index_captions(video_id: str, frame_paths: list[str], captions: list[str], f
             frame_number = i
         ids.append(f"{video_id}_caption_{frame_number}")
         documents.append(caption)
+        # Bug #1 fix: use pre-computed real timestamp
+        ts = timestamps[i] if timestamps and i < len(timestamps) else float(frame_number)
         metadatas.append({
             "video_id": video_id,
             "frame_number": frame_number,
-            "timestamp": round(frame_number * frame_interval_sec, 2),
+            "timestamp": round(ts, 2),
             "frame_path": _to_url_path(path, video_id),
         })
 
@@ -436,13 +445,14 @@ def get_index_stats() -> dict:
         "image_index": _image_col.count(),
         "caption_index": _caption_col.count(),
         "speech_index": _speech_col.count(),
+        "ocr_index": _ocr_col.count(),
     }
 
 
 def delete_video_from_indexes(video_id: str):
     """Remove all indexed data for a specific video."""
     get_chroma_client()
-    for col in [_image_col, _caption_col, _speech_col]:
+    for col in [_image_col, _caption_col, _speech_col, _ocr_col]:
         try:
             existing = col.get(where={"video_id": video_id})
             if existing and existing["ids"]:
@@ -466,4 +476,118 @@ def get_caption_for_frame(video_id: str, frame_number: int) -> str:
     except Exception:
         pass
     return ""
+
+
+# ── OCR Index (Phase 3) ─────────────────────────────────────────────────────
+
+def index_ocr(video_id: str, frame_paths: list[str], ocr_results: dict, timestamps: list[float] = None):
+    """Index OCR-extracted text into the ocr_index collection.
+
+    Args:
+        video_id: The video identifier.
+        frame_paths: List of frame file paths.
+        ocr_results: Dict mapping frame_path -> list of {text, bbox, confidence}.
+        timestamps: Pre-computed real timestamps for each frame.
+    """
+    get_chroma_client()
+    ids = []
+    documents = []
+    metadatas = []
+
+    for i, path in enumerate(frame_paths):
+        ocr_items = ocr_results.get(path, [])
+        if not ocr_items:
+            continue
+
+        frame_number = _extract_frame_number(path)
+        if frame_number is None:
+            frame_number = i
+
+        # Combine all OCR text from this frame into one document
+        combined_text = " | ".join(item["text"] for item in ocr_items)
+        if not combined_text.strip():
+            continue
+
+        ts = timestamps[i] if timestamps and i < len(timestamps) else float(frame_number)
+
+        ids.append(f"{video_id}_ocr_{frame_number}")
+        documents.append(combined_text)
+        metadatas.append({
+            "video_id": video_id,
+            "frame_number": frame_number,
+            "timestamp": round(ts, 2),
+            "frame_path": _to_url_path(path, video_id),
+            "ocr_text": combined_text,
+        })
+
+    if not ids:
+        logger.info(f"No OCR text found for video {video_id}")
+        return
+
+    embeddings = [embedding_service.embed_text(doc) for doc in documents]
+
+    batch_size = 500
+    for start in range(0, len(ids), batch_size):
+        end = start + batch_size
+        _ocr_col.upsert(
+            ids=ids[start:end],
+            documents=documents[start:end],
+            embeddings=embeddings[start:end],
+            metadatas=metadatas[start:end],
+        )
+    logger.info(f"Indexed {len(ids)} OCR frames for video {video_id}")
+
+
+_OCR_MIN_SCORE = 0.15
+
+
+def search_ocr(query_text: str, n: int = 10, video_id: str = None) -> list[dict]:
+    """Search OCR index by text embedding similarity."""
+    get_chroma_client()
+
+    count = _ocr_col.count()
+    if count == 0:
+        logger.warning("OCR index is empty, nothing to search.")
+        return []
+
+    where = {"video_id": video_id} if video_id else None
+    query_embedding = embedding_service.embed_text(query_text)
+    requested = max(1, n)
+    probe_n = min(max(requested * 4, requested), count)
+
+    try:
+        results = _ocr_col.query(
+            query_embeddings=[query_embedding],
+            n_results=probe_n,
+            where=where,
+            include=["metadatas", "documents", "distances"]
+        )
+    except Exception as e:
+        logger.error(f"OCR search failed: {e}")
+        return []
+
+    hits = []
+    if results and results["ids"] and results["ids"][0]:
+        for i, id_ in enumerate(results["ids"][0]):
+            meta = results["metadatas"][0][i] if results["metadatas"] else {}
+            doc = results["documents"][0][i] if results["documents"] else ""
+            dist = results["distances"][0][i] if results["distances"] else 0
+            score = round(1 - dist, 4)
+            if score < _OCR_MIN_SCORE:
+                continue
+            vid = meta.get("video_id", "")
+            frame_path = _normalize_frame_path(meta.get("frame_path", ""), vid)
+            hits.append({
+                "id": id_,
+                "score": score,
+                "video_id": vid,
+                "frame_number": meta.get("frame_number"),
+                "timestamp": meta.get("timestamp"),
+                "frame_path": frame_path,
+                "content": f"OCR text: {doc}",
+                "source_index": "ocr",
+            })
+            if len(hits) >= requested:
+                break
+    return hits
 

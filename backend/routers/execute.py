@@ -50,7 +50,7 @@ def _select_caption_frames(frame_paths: list[str]) -> list[str]:
     return selected
 
 
-def _generate_captions(video_id: str, frame_paths: list[str], valid_frame_paths: list[str], frame_interval_sec: float = 1.0) -> int:
+def _generate_captions(video_id: str, frame_paths: list[str], valid_frame_paths: list[str], timestamps: list[float] = None) -> int:
     """Generate and index captions for selected key frames only."""
     try:
         caption_frame_paths = _select_caption_frames(frame_paths)
@@ -70,8 +70,21 @@ def _generate_captions(video_id: str, frame_paths: list[str], valid_frame_paths:
             if caption
         }
         aligned_captions = [caption_map.get(path, "") for path in valid_frame_paths]
-        indexing_service.index_captions(video_id, valid_frame_paths, aligned_captions, frame_interval_sec=frame_interval_sec)
-        return sum(1 for c in aligned_captions if c)
+        indexing_service.index_captions(video_id, valid_frame_paths, aligned_captions, timestamps=timestamps)
+        caption_count = sum(1 for c in aligned_captions if c)
+
+        # Bug #4 fix: update captions_ready in metadata
+        meta_path = METADATA_DIR / f"{video_id}.json"
+        if meta_path.exists():
+            import json
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+            meta["captions_ready"] = True
+            meta["caption_count"] = caption_count
+            with open(meta_path, "w") as f:
+                json.dump(meta, f, indent=2)
+
+        return caption_count
     except Exception as e:
         logger.exception("Caption generation failed for video %s: %s", video_id, e)
         return 0
@@ -80,7 +93,7 @@ def _generate_captions(video_id: str, frame_paths: list[str], valid_frame_paths:
 def _process_video(task_id: str, video_path: str, video_id: str):
     """Full video processing pipeline — runs in background thread."""
     try:
-        total_steps = 5 if CAPTION_MODE == "sync" else 4
+        total_steps = 8 if CAPTION_MODE == "sync" else 7
         current = 0
 
         # Step 1: Extract metadata
@@ -88,14 +101,22 @@ def _process_video(task_id: str, video_path: str, video_id: str):
         metadata = video_processor.get_video_metadata(video_path, video_id)
         current += 1
 
-        # Step 2: Extract frames
-        _update_task(task_id, message="Extracting frames from video...", progress=current / total_steps)
-        frame_paths = video_processor.extract_frames(
-            video_path,
-            video_id,
-            fps=FRAME_SAMPLE_FPS,
-            max_frames=MAX_FRAMES_PER_VIDEO,
-        )
+        # Step 2: Extract frames (Phase 2: adaptive scene-change sampling)
+        _update_task(task_id, message="Extracting frames from video (adaptive sampling)...", progress=current / total_steps)
+        try:
+            frame_paths, timestamps = video_processor.extract_frames_adaptive(
+                video_path,
+                video_id,
+                max_frames=MAX_FRAMES_PER_VIDEO,
+            )
+        except Exception as e:
+            logger.warning(f"Adaptive sampling failed, falling back to uniform: {e}")
+            frame_paths, timestamps = video_processor.extract_frames(
+                video_path,
+                video_id,
+                fps=FRAME_SAMPLE_FPS,
+                max_frames=MAX_FRAMES_PER_VIDEO,
+            )
         if not frame_paths:
             _update_task(task_id, status="failed", message="No frames extracted from video.", progress=1.0)
             return
@@ -107,29 +128,69 @@ def _process_video(task_id: str, video_path: str, video_id: str):
         current += 1
 
         # Step 4: Generate CLIP embeddings
-        # Fix 8: embed_batch now returns (embeddings, valid_paths) — skip failed images
+        # embed_batch returns (embeddings, valid_paths) — skip failed images
         _update_task(task_id, message=f"Generating visual embeddings for {len(frame_paths)} frames...", progress=current / total_steps)
         embeddings, valid_frame_paths = embedding_service.embed_batch(frame_paths)
 
-        # Compute real time interval between consecutive frames
-        video_duration = metadata.get("duration", len(valid_frame_paths))
-        frame_interval_sec = video_duration / max(len(valid_frame_paths), 1)
+        # Build timestamps aligned with valid_frame_paths
+        valid_timestamps = []
+        path_to_ts = dict(zip(frame_paths, timestamps))
+        for vp in valid_frame_paths:
+            valid_timestamps.append(path_to_ts.get(vp, 0.0))
 
-        indexing_service.index_frames(video_id, valid_frame_paths, embeddings, frame_interval_sec=frame_interval_sec)
+        # Bug #1 fix: pass pre-computed timestamps directly
+        indexing_service.index_frames(video_id, valid_frame_paths, embeddings, timestamps=valid_timestamps)
         current += 1
 
         caption_count = 0
         if CAPTION_MODE == "sync":
-            caption_count = _generate_captions(video_id, frame_paths, valid_frame_paths, frame_interval_sec)
+            caption_count = _generate_captions(video_id, frame_paths, valid_frame_paths, timestamps=valid_timestamps)
             current += 1
         elif CAPTION_MODE == "async":
+            _update_task(task_id, captions_ready=False)
             threading.Thread(
                 target=_generate_captions,
-                args=(video_id, frame_paths, valid_frame_paths, frame_interval_sec),
+                args=(video_id, frame_paths, valid_frame_paths),
+                kwargs={"timestamps": valid_timestamps},
                 daemon=True,
             ).start()
 
-        # Step 5 (or 4): Transcribe audio
+        # Step 5: OCR extraction (Phase 3)
+        _update_task(task_id, message="Extracting text from frames (OCR)...", progress=current / total_steps)
+        try:
+            from backend.services import ocr_service
+            ocr_results = ocr_service.extract_text_batch(valid_frame_paths, stride=3)
+            indexing_service.index_ocr(video_id, valid_frame_paths, ocr_results, timestamps=valid_timestamps)
+        except ImportError:
+            logger.warning("EasyOCR not installed, skipping OCR extraction.")
+        except Exception as e:
+            logger.warning(f"OCR extraction failed (non-fatal): {e}")
+        current += 1
+
+        # Step 6: Object Detection (Phase 4) + Scene Graph (Phase 5)
+        _update_task(task_id, message="Running object detection (YOLO)...", progress=current / total_steps)
+        try:
+            from backend.services import detection_service, detection_db, scene_graph_service
+            det_results = detection_service.detect_batch(valid_frame_paths, stride=2)
+            detection_db.store_detections_batch(video_id, valid_frame_paths, det_results, timestamps=valid_timestamps)
+
+            # Scene graph: extract spatial relations from detections
+            from backend.services.indexing_service import _extract_frame_number
+            for i, path in enumerate(valid_frame_paths):
+                dets = det_results.get(path, [])
+                if len(dets) >= 2:
+                    frame_number = _extract_frame_number(path) or i
+                    ts = valid_timestamps[i] if i < len(valid_timestamps) else 0.0
+                    triples = scene_graph_service.process_frame_relations(dets)
+                    if triples:
+                        detection_db.store_relations(video_id, frame_number, ts, triples)
+        except ImportError as ie:
+            logger.warning(f"Detection dependencies not installed, skipping: {ie}")
+        except Exception as e:
+            logger.warning(f"Object detection failed (non-fatal): {e}")
+        current += 1
+
+        # Step 7: Transcribe audio
         if audio_path:
             _update_task(task_id, message="Transcribing audio...", progress=current / total_steps)
             segments = transcription_service.transcribe_audio(audio_path)
@@ -145,12 +206,15 @@ def _process_video(task_id: str, video_path: str, video_id: str):
         else:
             caption_state = f"{caption_count} captions indexed"
 
+        # Bug #4 fix: track captions_ready status
+        captions_ready = CAPTION_MODE == "sync" or CAPTION_MODE == "off"
         _update_task(
             task_id,
             status="completed",
             message=f"Processing complete. {len(valid_frame_paths)} frames, {caption_state}.",
             progress=1.0,
             video_id=video_id,
+            captions_ready=captions_ready,
         )
         logger.info(f"Video {video_id} processing completed successfully.")
 
@@ -214,6 +278,14 @@ async def delete_video(video_id: str):
         deleted_items.append("indexes")
     except Exception as e:
         logger.error(f"Error deleting indexes for {video_id}: {e}")
+
+    # Delete from detection/scene-graph DB
+    try:
+        from backend.services import detection_db
+        detection_db.delete_video_data(video_id)
+        deleted_items.append("detections")
+    except Exception as e:
+        logger.warning(f"Error deleting detection data for {video_id}: {e}")
 
     # Delete video file (try all extensions)
     for ext in ALLOWED_EXTENSIONS:

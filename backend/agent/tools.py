@@ -1,6 +1,7 @@
 """
 VideoRAG — Agent Tool Definitions
 Tool schemas for Groq function calling.
+Includes all tools for the full architecture: caption, visual, speech, OCR, detection, scene graph.
 """
 
 TOOL_DEFINITIONS = [
@@ -132,5 +133,117 @@ TOOL_DEFINITIONS = [
                 "required": ["video_id", "start_time", "end_time"]
             }
         }
-    }
+    },
+    # ── Phase 3: OCR Tool ────────────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "search_ocr",
+            "description": "Search for on-screen text (OCR) found in video frames. Use this when the user asks about text visible in the video — signs, labels, titles, subtitles, license plates, book covers, etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Text to search for in OCR-extracted content"
+                    },
+                    "video_id": {
+                        "type": "string",
+                        "description": "Optional: specific video ID to search within."
+                    },
+                    "n": {
+                        "type": "integer",
+                        "description": "Number of results to return (default: 10)",
+                        "default": 10
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    # ── Phase 4: Detection Tools ─────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "count_objects",
+            "description": "Count how many instances of a specific object class appear in video frames. Use for 'how many cars/people/books are there?' type questions. Returns the maximum count seen in any single frame and the number of frames where the object appears.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "class_name": {
+                        "type": "string",
+                        "description": "Object class to count (e.g., 'car', 'person', 'book', 'chair'). Use COCO class names."
+                    },
+                    "video_id": {
+                        "type": "string",
+                        "description": "The video ID to search within."
+                    },
+                    "start_time": {
+                        "type": "number",
+                        "description": "Optional: start of time range in seconds"
+                    },
+                    "end_time": {
+                        "type": "number",
+                        "description": "Optional: end of time range in seconds"
+                    }
+                },
+                "required": ["class_name", "video_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "locate_object",
+            "description": "Find the spatial location of a specific object in video frames. Returns bounding box coordinates and a spatial description (e.g., 'top-left', 'center', 'bottom-right'). Use for 'where is the X in the video?' type questions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "class_name": {
+                        "type": "string",
+                        "description": "Object class to locate (e.g., 'car', 'person', 'book'). Use COCO class names."
+                    },
+                    "video_id": {
+                        "type": "string",
+                        "description": "The video ID to search within."
+                    },
+                    "start_time": {
+                        "type": "number",
+                        "description": "Optional: start of time range in seconds"
+                    },
+                    "end_time": {
+                        "type": "number",
+                        "description": "Optional: end of time range in seconds"
+                    }
+                },
+                "required": ["class_name", "video_id"]
+            }
+        }
+    },
+    # ── Phase 5: Scene Graph Tool ────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "get_relations",
+            "description": "Get spatial relationships between objects in video frames (e.g., 'book on top of table', 'person left of car', 'cat near sofa'). Use for questions about how objects relate to each other spatially.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "video_id": {
+                        "type": "string",
+                        "description": "The video ID to search within."
+                    },
+                    "start_time": {
+                        "type": "number",
+                        "description": "Optional: start of time range in seconds"
+                    },
+                    "end_time": {
+                        "type": "number",
+                        "description": "Optional: end of time range in seconds"
+                    }
+                },
+                "required": ["video_id"]
+            }
+        }
+    },
 ]

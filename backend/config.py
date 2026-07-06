@@ -43,15 +43,15 @@ BLIP_MODEL = os.getenv("BLIP_MODEL", "Salesforce/blip-image-captioning-base")
 
 # Processing
 FRAME_SAMPLE_FPS = float(os.getenv("FRAME_SAMPLE_FPS", "1"))
-MAX_FRAMES_PER_VIDEO = int(os.getenv("MAX_FRAMES_PER_VIDEO", "48"))
+MAX_FRAMES_PER_VIDEO = int(os.getenv("MAX_FRAMES_PER_VIDEO", "300"))
 CAPTION_STRIDE = int(os.getenv("CAPTION_STRIDE", "3"))
 CAPTION_MAX_FRAMES = int(os.getenv("CAPTION_MAX_FRAMES", "24"))
 CAPTION_MODE = os.getenv("CAPTION_MODE", "sync").strip().lower()
 if CAPTION_MODE not in {"sync", "async", "off"}:
     CAPTION_MODE = "async"
-CAPTION_BACKEND = os.getenv("CAPTION_BACKEND", "clip").strip().lower()
+CAPTION_BACKEND = os.getenv("CAPTION_BACKEND", "blip").strip().lower()
 if CAPTION_BACKEND not in {"clip", "blip"}:
-    CAPTION_BACKEND = "clip"
+    CAPTION_BACKEND = "blip"
 
 # Groq
 GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
@@ -65,3 +65,8 @@ FRONTEND_PORT = int(os.getenv("FRONTEND_PORT", "5173"))
 IMAGE_COLLECTION = os.getenv("IMAGE_COLLECTION", "image_index")
 CAPTION_COLLECTION = os.getenv("CAPTION_COLLECTION", "caption_index_clip")
 SPEECH_COLLECTION = os.getenv("SPEECH_COLLECTION", "speech_index_clip")
+OCR_COLLECTION = os.getenv("OCR_COLLECTION", "ocr_index")
+
+# Phase 4-5: Object Detection & Scene Graph
+DETECTION_DB_PATH = DATA_DIR / "detections.db"
+YOLO_MODEL = os.getenv("YOLO_MODEL", "yolov8n")

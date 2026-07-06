@@ -24,6 +24,7 @@ class TaskStatus(BaseModel):
     progress: float = 0.0  # 0.0 to 1.0
     message: str = ""
     video_id: Optional[str] = None
+    captions_ready: bool = False
 
 
 # ── Chat ─────────────────────────────────────────────────────────────────────
@@ -72,3 +73,4 @@ class VideoInfo(BaseModel):
     status: str = "processing"  # "processing" | "completed" | "failed"
     uploaded_at: Optional[str] = None
     thumbnail: Optional[str] = None
+    captions_ready: bool = False

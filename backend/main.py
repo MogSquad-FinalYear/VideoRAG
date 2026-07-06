@@ -56,6 +56,12 @@ async def root():
 async def health():
     from backend.services.indexing_service import get_index_stats
     stats = get_index_stats()
+    # Check detection DB
+    try:
+        from backend.config import DETECTION_DB_PATH
+        stats["detection_db"] = "available" if DETECTION_DB_PATH.parent.exists() else "missing"
+    except Exception:
+        stats["detection_db"] = "unavailable"
     return {"status": "healthy", "indexes": stats}
 
 
