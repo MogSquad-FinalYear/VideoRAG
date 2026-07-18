@@ -160,7 +160,7 @@ def _enrich_with_descriptions(sources: list[dict], max_describe: int = 2) -> lis
 
 # ── Phase 6: Query Decouple ──────────────────────────────────────────────────
 
-DECOUPLE_PROMPT = """You are a query decomposition engine for a video analysis system.
+DECOUPLE_PROMPT = """You are a query decomposition engine for a courtroom video analysis system.
 Given a user's natural language question about a video, decompose it into a structured JSON retrieval request.
 
 Output ONLY valid JSON with these fields:
@@ -171,7 +171,8 @@ Output ONLY valid JSON with these fields:
   "ocr_query": "text to search in on-screen text, or null if not needed",
   "det_classes": ["list", "of", "object", "classes", "to", "detect"],
   "need_relations": false,
-  "answer_type": "one of: count, location, description, timestamp, relation, general"
+  "check_contradictions": false,
+  "answer_type": "one of: count, location, description, timestamp, relation, contradiction, general"
 }
 
 Rules:
@@ -181,6 +182,7 @@ Rules:
 - For speech/dialog questions, set asr_query and answer_type="description"
 - For visual search ("show me X"), set visual_query and caption_query
 - For text/reading questions, set ocr_query
+- For consistency/contradiction questions ("did the witness contradict", "testimony consistency", "changed their story"), set check_contradictions=true and answer_type="contradiction"
 - Always include visual_query and caption_query for general questions
 - Use COCO class names for det_classes when possible (person, car, dog, cat, book, chair, etc.)
 """
@@ -195,6 +197,7 @@ def _decouple_query(query: str) -> dict:
         "ocr_query": None,
         "det_classes": [],
         "need_relations": False,
+        "check_contradictions": False,
         "answer_type": "general",
     }
 
@@ -377,6 +380,15 @@ def _execute_tool(tool_name: str, args: dict) -> str:
             )
             return json.dumps(results, indent=2)
 
+        # ── Phase 7: Contradiction checking ────────────────────────────────
+        elif tool_name == "check_contradictions":
+            from backend.services import testimony_db
+            contradictions = testimony_db.get_contradictions(
+                case_id=args["case_id"],
+                speaker_id=args.get("speaker_id"),
+            )
+            return json.dumps(contradictions, indent=2)
+
         else:
             return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
@@ -388,7 +400,8 @@ def _execute_tool(tool_name: str, args: dict) -> str:
 # ── Phase 6: Structured Source Collection (Query Decouple → Route) ───────────
 
 def _collect_sources_decoupled(query: str, decouple: dict, video_id: str = None,
-                                image_path: str = None) -> tuple[list[dict], list[str], dict]:
+                                image_path: str = None,
+                                case_id: str = None) -> tuple[list[dict], list[str], dict]:
     """
     Phase 6: Collect sources using structured decouple output to decide which
     tools/collections to query instead of flat heuristic routing.
@@ -404,6 +417,7 @@ def _collect_sources_decoupled(query: str, decouple: dict, video_id: str = None,
         "detection_results": {},
         "location_results": [],
         "relation_results": [],
+        "contradiction_results": [],
     }
 
     # ── Image-to-Video search (Strategy B) ───────────────────────────────
@@ -502,6 +516,15 @@ def _collect_sources_decoupled(query: str, decouple: dict, video_id: str = None,
         }))
         if isinstance(relations, list):
             structured_evidence["relation_results"] = relations
+
+    # ── Contradiction checking (Phase 7) ───────────────────────────────
+    if decouple.get("check_contradictions") and case_id:
+        used_strategies.append("contradiction-check")
+        contradiction_results = json.loads(_execute_tool("check_contradictions", {
+            "case_id": case_id,
+        }))
+        if isinstance(contradiction_results, list):
+            structured_evidence["contradiction_results"] = contradiction_results
 
     # Deduplicate sources: keep best score per unique (video_id, frame_number/timestamp)
     best_by_key = {}
@@ -607,19 +630,41 @@ def _merge_and_rearrange(query: str, sources: list[dict], structured_evidence: d
             rel_lines.append(f"  - {ts_str}: {triple}")
         context_parts.append("## Object Relations (Scene Graph)\n" + "\n".join(rel_lines))
 
+    # Contradiction evidence (Phase 7)
+    contradictions = structured_evidence.get("contradiction_results", [])
+    if contradictions:
+        contra_lines = []
+        for c in contradictions[:5]:
+            speaker = c.get("speaker_id", "unknown")
+            conf = c.get("confidence", 0)
+            stmt_a = c.get("stmt_a_text", "")
+            stmt_b = c.get("stmt_b_text", "")
+            ts_a = c.get("stmt_a_timestamp", 0)
+            ts_b = c.get("stmt_b_timestamp", 0)
+            vid_a = c.get("stmt_a_video_id", "")
+            vid_b = c.get("stmt_b_video_id", "")
+            contra_lines.append(
+                f"  - **{speaker}** (confidence: {conf:.0%}):\n"
+                f"    Session 1 [{int(ts_a)//60:02d}:{int(ts_a)%60:02d}] (video {vid_a}): \"{stmt_a}\"\n"
+                f"    Session 2 [{int(ts_b)//60:02d}:{int(ts_b)%60:02d}] (video {vid_b}): \"{stmt_b}\"\n"
+                f"    Explanation: {c.get('explanation', 'N/A')}"
+            )
+        context_parts.append("## Testimony Contradictions\n" + "\n".join(contra_lines))
+
     merged_context = "\n\n".join(context_parts) if context_parts else "No evidence found."
 
     # Build the final LLM prompt
     answer_type = decouple.get("answer_type", "general")
 
-    system_prompt = """You are **Kubrick**, a forensic video analysis AI assistant.
+    system_prompt = """You are **Kubrick**, a forensic video analysis AI assistant for courtroom proceedings.
 
 You analyze multimodal evidence from a video retrieval system. You receive structured evidence from:
 1. **Caption/Visual Index** — AI-generated scene descriptions and CLIP similarity matches
-2. **Speech/ASR Index** — Transcribed speech and dialogue
+2. **Speech/ASR Index** — Transcribed speech and dialogue with speaker/role tags
 3. **OCR Index** — On-screen text extracted from frames
 4. **Object Detection** — YOLO-detected objects with counts and locations
 5. **Scene Graph** — Spatial relationships between detected objects
+6. **Testimony Memory** — Cross-session contradiction detection results
 
 ## CRITICAL RULES
 1. Base your answer ONLY on the provided evidence — do NOT fabricate details.
@@ -629,7 +674,9 @@ You analyze multimodal evidence from a video retrieval system. You receive struc
 5. State confidence level when relevant.
 6. For counting questions, use the detection count data.
 7. For location questions, describe spatial positions from detection data.
-8. For relation questions, reference the scene graph triples."""
+8. For relation questions, reference the scene graph triples.
+9. When speaker/role information is available, attribute quotes to the speaker (e.g., "The witness stated...").
+10. For contradiction questions, present both conflicting statements with their timestamps and sessions."""
 
     user_prompt = f"""User query: "{query}"
 Answer type: {answer_type}
@@ -732,7 +779,8 @@ def _render_answer_fallback(query: str, sources: list[dict], strategies: list[st
 
 # ── Main Agent Entry Point ───────────────────────────────────────────────────
 
-def run_agent(query: str, video_id: str = None, image_path: str = None, conversation_history: list = None) -> dict:
+def run_agent(query: str, video_id: str = None, image_path: str = None,
+              conversation_history: list = None, case_id: str = None) -> dict:
     """
     Run the full 3-stage VideoRAG pipeline:
     ① Query Decouple — decompose user query
@@ -740,6 +788,14 @@ def run_agent(query: str, video_id: str = None, image_path: str = None, conversa
     ③ Merge & Rearrange — assemble evidence and generate answer
     """
     is_image_search = image_path is not None
+
+    # ── Resolve case_id if not provided but video_id is known ────────────
+    if not case_id and video_id:
+        try:
+            from backend.services import testimony_db
+            case_id = testimony_db.get_case_id_for_video(video_id)
+        except Exception:
+            pass
 
     # ── Stage ①: Query Decouple ──────────────────────────────────────────
     if is_image_search:
@@ -750,14 +806,28 @@ def run_agent(query: str, video_id: str = None, image_path: str = None, conversa
             "ocr_query": None,
             "det_classes": [],
             "need_relations": False,
+            "check_contradictions": False,
             "answer_type": "description",
         }
     else:
         decouple = _decouple_query(query)
 
+        # Heuristic fallback: detect contradiction queries by keyword
+        q_lower = query.lower()
+        contradiction_keywords = [
+            "contradict", "contradiction", "inconsisten", "consistent",
+            "changed", "lied", "lying", "conflicting", "discrepan",
+            "testimony", "recant",
+        ]
+        if any(kw in q_lower for kw in contradiction_keywords):
+            decouple["check_contradictions"] = True
+            if decouple.get("answer_type") == "general":
+                decouple["answer_type"] = "contradiction"
+
     # ── Stage ②: Multimodal Retrieval ────────────────────────────────────
     sources, strategies, structured_evidence = _collect_sources_decoupled(
-        query=query, decouple=decouple, video_id=video_id, image_path=image_path
+        query=query, decouple=decouple, video_id=video_id,
+        image_path=image_path, case_id=case_id,
     )
 
     # ── Hard confidence gate for image search ──
@@ -801,10 +871,37 @@ def run_agent(query: str, video_id: str = None, image_path: str = None, conversa
         video_id=video_id, is_image_search=is_image_search,
     )
 
+    # ── Stage ④: Citation Verification (Phase 8) ─────────────────────────
+    citations = []
+    if video_id and answer and not is_image_search:
+        try:
+            from backend.services import citation_service
+            citations = citation_service.verify_and_store_citations(
+                answer=answer, video_id=video_id,
+            )
+        except Exception as e:
+            logger.warning("Citation verification failed (non-fatal): %s", e)
+
     return {
         "answer": answer,
         "clips": _build_clips(sources, max_clips=max_results),
         "sources": sources,
+        "citations": citations,
+        "contradictions": [
+            {
+                "contradiction_id": c.get("id", ""),
+                "speaker_id": c.get("speaker_id", ""),
+                "statement_a": c.get("stmt_a_text", ""),
+                "statement_b": c.get("stmt_b_text", ""),
+                "confidence": c.get("confidence", 0),
+                "explanation": c.get("explanation", ""),
+                "video_a": c.get("stmt_a_video_id"),
+                "video_b": c.get("stmt_b_video_id"),
+                "timestamp_a": c.get("stmt_a_timestamp"),
+                "timestamp_b": c.get("stmt_b_timestamp"),
+            }
+            for c in structured_evidence.get("contradiction_results", [])
+        ],
     }
 
 

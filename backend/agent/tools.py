@@ -246,4 +246,26 @@ TOOL_DEFINITIONS = [
             }
         }
     },
+    # ── Phase 7: Contradiction Checking Tool ─────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "check_contradictions",
+            "description": "Check for contradictions in testimony by the same speaker across different court sessions. Use when the user asks about consistency, contradictions, conflicting statements, or whether a witness changed their story. Requires a case_id to search across sessions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "case_id": {
+                        "type": "string",
+                        "description": "The case ID to check contradictions within."
+                    },
+                    "speaker_id": {
+                        "type": "string",
+                        "description": "Optional: specific speaker ID to check (e.g., 'SPEAKER_0'). Omit to check all speakers."
+                    }
+                },
+                "required": ["case_id"]
+            }
+        }
+    },
 ]

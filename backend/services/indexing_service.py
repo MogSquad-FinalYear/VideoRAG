@@ -183,7 +183,10 @@ def index_captions(video_id: str, frame_paths: list[str], captions: list[str], t
 
 
 def index_transcripts(video_id: str, segments: list[dict]):
-    """Index transcript segments using local CLIP text embeddings."""
+    """Index transcript segments using local CLIP text embeddings.
+    
+    Each segment may include speaker_id and role fields (Phase 6).
+    """
     get_chroma_client()
     ids = []
     documents = []
@@ -193,11 +196,17 @@ def index_transcripts(video_id: str, segments: list[dict]):
             continue
         ids.append(f"{video_id}_speech_{i}")
         documents.append(seg["text"])
-        metadatas.append({
+        meta = {
             "video_id": video_id,
             "start_time": seg["start_time"],
             "end_time": seg["end_time"],
-        })
+        }
+        # Phase 6: Speaker/role tagging
+        if seg.get("speaker_id"):
+            meta["speaker_id"] = seg["speaker_id"]
+        if seg.get("role"):
+            meta["role"] = seg["role"]
+        metadatas.append(meta)
 
     if not ids:
         return

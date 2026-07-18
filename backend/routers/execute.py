@@ -9,7 +9,7 @@ import threading
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 
 from backend.config import (
     VIDEOS_DIR,
@@ -90,10 +90,10 @@ def _generate_captions(video_id: str, frame_paths: list[str], valid_frame_paths:
         return 0
 
 
-def _process_video(task_id: str, video_path: str, video_id: str):
+def _process_video(task_id: str, video_path: str, video_id: str, case_id: str = None):
     """Full video processing pipeline — runs in background thread."""
     try:
-        total_steps = 8 if CAPTION_MODE == "sync" else 7
+        total_steps = 10 if CAPTION_MODE == "sync" else 9
         current = 0
 
         # Step 1: Extract metadata
@@ -190,13 +190,62 @@ def _process_video(task_id: str, video_path: str, video_id: str):
             logger.warning(f"Object detection failed (non-fatal): {e}")
         current += 1
 
-        # Step 7: Transcribe audio
+        # Step 7: Transcribe audio + Speaker Tagging (Phase 6)
+        segments = []
         if audio_path:
             _update_task(task_id, message="Transcribing audio...", progress=current / total_steps)
             segments = transcription_service.transcribe_audio(audio_path)
+
+            # Phase 6: Assign speaker IDs and auto-detect roles
+            try:
+                from backend.services import speaker_service
+                segments = speaker_service.assign_speaker_ids(segments)
+                segments = speaker_service.auto_detect_roles_for_segments(segments)
+                # Store auto-detected roles
+                speaker_roles_seen = {}
+                for seg in segments:
+                    sid = seg.get("speaker_id", "SPEAKER_0")
+                    role = seg.get("role", "unknown")
+                    if sid not in speaker_roles_seen:
+                        speaker_roles_seen[sid] = role
+                        speaker_service.set_speaker_role(video_id, sid, role)
+                logger.info("Speaker tagging complete: %d speakers detected", len(speaker_roles_seen))
+            except Exception as e:
+                logger.warning("Speaker tagging failed (non-fatal): %s", e)
+
             indexing_service.index_transcripts(video_id, segments)
         else:
             _update_task(task_id, message="No audio track found, skipping transcription.", progress=current / total_steps)
+        current += 1
+
+        # Step 8: Store testimony in cross-session memory (Phase 7)
+        _update_task(task_id, message="Storing testimony in case memory...", progress=current / total_steps)
+        if segments and case_id:
+            try:
+                from backend.services import testimony_db
+                session_id = video_id  # Each video is a session
+                testimony_db.store_statements_batch(
+                    case_id=case_id,
+                    session_id=session_id,
+                    video_id=video_id,
+                    segments=segments,
+                )
+            except Exception as e:
+                logger.warning("Testimony storage failed (non-fatal): %s", e)
+        current += 1
+
+        # Step 9: Contradiction scanning (Phase 7) — runs in background
+        _update_task(task_id, message="Scanning for testimony contradictions...", progress=current / total_steps)
+        if segments and case_id:
+            try:
+                from backend.services import contradiction_service
+                threading.Thread(
+                    target=contradiction_service.scan_for_contradictions,
+                    args=(case_id, video_id, segments),
+                    daemon=True,
+                ).start()
+            except Exception as e:
+                logger.warning("Contradiction scanning failed (non-fatal): %s", e)
         current += 1
 
         if CAPTION_MODE == "off":
@@ -208,6 +257,18 @@ def _process_video(task_id: str, video_path: str, video_id: str):
 
         # Bug #4 fix: track captions_ready status
         captions_ready = CAPTION_MODE == "sync" or CAPTION_MODE == "off"
+
+        # Store case_id in metadata
+        if case_id:
+            meta_path = METADATA_DIR / f"{video_id}.json"
+            if meta_path.exists():
+                import json as _json
+                with open(meta_path, "r") as f:
+                    meta = _json.load(f)
+                meta["case_id"] = case_id
+                with open(meta_path, "w") as f:
+                    _json.dump(meta, f, indent=2)
+
         _update_task(
             task_id,
             status="completed",
@@ -224,8 +285,18 @@ def _process_video(task_id: str, video_path: str, video_id: str):
 
 
 @router.post("/execute", response_model=ExecuteResponse)
-async def execute_upload(file: UploadFile = File(...)):
-    """Upload a video file and start background processing."""
+async def execute_upload(
+    file: UploadFile = File(...),
+    case_id: str = Form(default=None),
+):
+    """Upload a video file and start background processing.
+    
+    Args:
+        file: Video file to upload.
+        case_id: Optional case identifier to group videos for cross-session
+                 testimony memory. If not provided, a unique case_id is
+                 auto-generated per video.
+    """
     # Validate file type
     ext = Path(file.filename).suffix.lower()
     if ext not in ALLOWED_EXTENSIONS:
@@ -234,6 +305,8 @@ async def execute_upload(file: UploadFile = File(...)):
     # Generate IDs
     video_id = str(uuid.uuid4())[:12]
     task_id = str(uuid.uuid4())[:12]
+    if not case_id:
+        case_id = f"case_{video_id}"  # Auto-generate case_id if not provided
 
     # Fix 9: Stream file to disk in chunks instead of loading entirely into RAM
     video_path = str(VIDEOS_DIR / f"{video_id}{ext}")
@@ -254,16 +327,26 @@ async def execute_upload(file: UploadFile = File(...)):
     tasks[task_id] = {
         "task_id": task_id,
         "video_id": video_id,
+        "case_id": case_id,
         "status": "processing",
         "progress": 0.0,
         "message": "Video uploaded. Starting processing pipeline...",
     }
 
     # Start background processing
-    thread = threading.Thread(target=_process_video, args=(task_id, video_path, video_id), daemon=True)
+    thread = threading.Thread(
+        target=_process_video,
+        args=(task_id, video_path, video_id, case_id),
+        daemon=True,
+    )
     thread.start()
 
-    return ExecuteResponse(task_id=task_id, status="processing", message="Video upload received. Processing started.")
+    return ExecuteResponse(
+        task_id=task_id,
+        status="processing",
+        message="Video upload received. Processing started.",
+        case_id=case_id,
+    )
 
 
 # Fix 14: Delete video endpoint
@@ -312,6 +395,14 @@ async def delete_video(video_id: str):
     if meta_file.exists():
         meta_file.unlink()
         deleted_items.append("metadata")
+
+    # Delete testimony data (Phase 7)
+    try:
+        from backend.services import testimony_db
+        testimony_db.delete_video_testimony(video_id)
+        deleted_items.append("testimony")
+    except Exception as e:
+        logger.warning(f"Error deleting testimony data for {video_id}: {e}")
 
     if not deleted_items:
         raise HTTPException(status_code=404, detail=f"Video {video_id} not found.")

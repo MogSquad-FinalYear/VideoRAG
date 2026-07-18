@@ -70,3 +70,7 @@ OCR_COLLECTION = os.getenv("OCR_COLLECTION", "ocr_index")
 # Phase 4-5: Object Detection & Scene Graph
 DETECTION_DB_PATH = DATA_DIR / "detections.db"
 YOLO_MODEL = os.getenv("YOLO_MODEL", "yolov8n")
+
+# Phase 6-8: Legal / Courtroom Features
+TESTIMONY_DB_PATH = DATA_DIR / "testimony.db"
+CITATION_DB_PATH = DATA_DIR / "citations.db"
