@@ -4,11 +4,13 @@ const API_BASE = '';
  * Upload a video file for processing.
  * @param {File} file
  * @param {function} onProgress - optional XHR progress callback
- * @returns {Promise<{task_id: string, status: string, message: string}>}
+ * @param {string|null} caseId - optional case identifier for cross-session testimony memory
+ * @returns {Promise<{task_id: string, status: string, message: string, case_id: string}>}
  */
-export async function uploadVideo(file, onProgress) {
+export async function uploadVideo(file, onProgress, caseId = null) {
   const formData = new FormData();
   formData.append('file', file);
+  if (caseId) formData.append('case_id', caseId);
 
   if (onProgress) {
     return new Promise((resolve, reject) => {
@@ -52,11 +54,13 @@ export async function getTaskStatus(taskId) {
  * Send a chat message to the agent.
  * @param {string} query
  * @param {string|null} videoId
- * @returns {Promise<{answer, clips, sources}>}
+ * @param {string|null} caseId - optional case ID for contradiction checking
+ * @returns {Promise<{answer, clips, sources, citations, contradictions}>}
  */
-export async function sendMessage(query, videoId = null) {
+export async function sendMessage(query, videoId = null, caseId = null) {
   const body = { query };
   if (videoId) body.video_id = videoId;
+  if (caseId) body.case_id = caseId;
 
   const res = await fetch(`${API_BASE}/chat`, {
     method: 'POST',

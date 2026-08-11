@@ -8,7 +8,7 @@ import './ChatWindow.css';
 
 let msgIdCounter = 0;
 
-export default function ChatWindow({ videoId, onClipClick }) {
+export default function ChatWindow({ videoId, caseId, onClipClick }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -69,7 +69,7 @@ export default function ChatWindow({ videoId, onClipClick }) {
     try {
       const result = imageToSend
         ? await sendMessageWithImage(queryToSend, imageToSend, videoId)
-        : await sendMessage(queryToSend, videoId);
+        : await sendMessage(queryToSend, videoId, caseId);
 
       const aiMsg = {
         id: `msg-${++msgIdCounter}`,
@@ -77,6 +77,8 @@ export default function ChatWindow({ videoId, onClipClick }) {
         text: result.answer,
         clips: result.clips || [],
         sources: result.sources || [],
+        citations: result.citations || [],
+        contradictions: result.contradictions || [],
       };
 
       setMessages((prev) => [...prev, aiMsg]);

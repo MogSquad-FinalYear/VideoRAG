@@ -313,3 +313,47 @@
 .upload-modal__submit:disabled {
   opacity: 0.4;
 }
+
+/* ── Case ID Input ─────────────────────────────────────────────────────────── */
+.upload-modal__case-id {
+  padding: 0 24px 12px;
+}
+
+.upload-modal__case-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.upload-modal__case-hint {
+  font-weight: 400;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+
+.upload-modal__case-input {
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  font-family: inherit;
+  transition: all var(--transition-fast);
+}
+
+.upload-modal__case-input:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.1);
+}
+
+.upload-modal__case-input::placeholder {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}

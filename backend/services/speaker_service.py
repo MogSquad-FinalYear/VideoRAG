@@ -1,12 +1,14 @@
 """
 VideoRAG — Speaker Service (Phase 6)
-Speaker turn detection and role mapping for courtroom video analysis.
+Speaker diarization, role detection, and cross-session voiceprint matching.
 
-Uses gap-based segmentation from Whisper ASR segments to separate speaker turns,
-then allows manual or rule-based role assignment (judge/witness/counsel).
+Primary: pyannote-audio for speaker diarization + Resemblyzer for voiceprint embedding.
+Fallback: gap-based heuristic when pyannote is unavailable.
 """
 import sqlite3
+import json
 import logging
+import struct
 from pathlib import Path
 
 from backend.config import TESTIMONY_DB_PATH
@@ -43,7 +45,7 @@ _WITNESS_CUES = [
 
 
 def _get_conn() -> sqlite3.Connection:
-    """Get SQLite connection for speaker role mappings."""
+    """Get SQLite connection for speaker role mappings and voiceprint registry."""
     global _db_initialized
     conn = sqlite3.connect(str(TESTIMONY_DB_PATH))
     conn.row_factory = sqlite3.Row
@@ -60,14 +62,191 @@ def _get_conn() -> sqlite3.Connection:
             );
             CREATE INDEX IF NOT EXISTS idx_speaker_video
                 ON speaker_roles(video_id);
+
+            CREATE TABLE IF NOT EXISTS speaker_registry (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                case_id TEXT NOT NULL,
+                canonical_name TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'unknown',
+                voiceprint_blob BLOB,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(case_id, canonical_name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_registry_case
+                ON speaker_registry(case_id);
+
+            CREATE TABLE IF NOT EXISTS speaker_video_map (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                case_id TEXT NOT NULL,
+                video_id TEXT NOT NULL,
+                local_speaker_id TEXT NOT NULL,
+                canonical_name TEXT NOT NULL,
+                confidence REAL DEFAULT 0.0,
+                confirmed_by_user INTEGER DEFAULT 0,
+                UNIQUE(video_id, local_speaker_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_svm_video
+                ON speaker_video_map(video_id);
+            CREATE INDEX IF NOT EXISTS idx_svm_case
+                ON speaker_video_map(case_id);
         """)
         _db_initialized = True
-        logger.info("Speaker roles table initialized.")
+        logger.info("Speaker roles + registry tables initialized.")
 
     return conn
 
 
-# ── Speaker Turn Detection ───────────────────────────────────────────────────
+# ── Voiceprint Utilities ─────────────────────────────────────────────────────
+
+def _blob_to_vector(blob: bytes) -> list[float]:
+    """Deserialize voiceprint vector from blob."""
+    if not blob:
+        return []
+    n = len(blob) // 4  # float32 = 4 bytes
+    return list(struct.unpack(f'{n}f', blob))
+
+
+def _vector_to_blob(vector: list[float]) -> bytes:
+    """Serialize voiceprint vector to blob."""
+    return struct.pack(f'{len(vector)}f', *vector)
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Compute cosine similarity between two vectors."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(x * x for x in b) ** 0.5
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+# ── Pyannote Diarization ─────────────────────────────────────────────────────
+
+_diarization_pipeline = None
+_pyannote_available = None
+
+
+def _is_pyannote_available() -> bool:
+    """Check if pyannote.audio is installed and usable."""
+    global _pyannote_available
+    if _pyannote_available is not None:
+        return _pyannote_available
+    try:
+        from pyannote.audio import Pipeline
+        _pyannote_available = True
+    except ImportError:
+        _pyannote_available = False
+        logger.info("pyannote.audio not installed — will use gap-based speaker detection.")
+    return _pyannote_available
+
+
+def _get_diarization_pipeline():
+    """Lazy-load the pyannote diarization pipeline."""
+    global _diarization_pipeline
+    if _diarization_pipeline is not None:
+        return _diarization_pipeline
+
+    try:
+        from pyannote.audio import Pipeline
+        import os
+        hf_token = os.environ.get("HF_TOKEN", "")
+        logger.info("Loading pyannote diarization pipeline...")
+        _diarization_pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.1",
+            use_auth_token=hf_token if hf_token else None,
+        )
+        logger.info("Pyannote diarization pipeline loaded successfully.")
+        return _diarization_pipeline
+    except Exception as e:
+        logger.warning("Failed to load pyannote pipeline: %s — falling back to gap-based detection.", e)
+        return None
+
+
+def diarize_audio(audio_path: str) -> list[dict]:
+    """
+    Run pyannote speaker diarization on an audio file.
+
+    Returns list of speaker turns:
+        [{"start_time": float, "end_time": float, "speaker_id": str}, ...]
+    """
+    if not _is_pyannote_available():
+        return []
+
+    pipeline = _get_diarization_pipeline()
+    if pipeline is None:
+        return []
+
+    try:
+        diarization = pipeline(audio_path)
+        turns = []
+        for turn, _, speaker in diarization.itertracks(yield_label=True):
+            turns.append({
+                "start_time": turn.start,
+                "end_time": turn.end,
+                "speaker_id": speaker,
+            })
+        logger.info("Pyannote diarization found %d turns from %d speakers.",
+                     len(turns), len(set(t["speaker_id"] for t in turns)))
+        return turns
+    except Exception as e:
+        logger.warning("Pyannote diarization failed: %s", e)
+        return []
+
+
+def align_segments_with_diarization(
+    segments: list[dict],
+    diarization_turns: list[dict],
+) -> list[dict]:
+    """
+    Align Whisper ASR segments with pyannote diarization turns.
+
+    For each ASR segment, find the diarization turn with maximum temporal overlap
+    and assign that turn's speaker_id.
+
+    Args:
+        segments: Whisper output [{"text", "start_time", "end_time"}, ...]
+        diarization_turns: Pyannote output [{"start_time", "end_time", "speaker_id"}, ...]
+
+    Returns:
+        segments with speaker_id assigned from diarization.
+    """
+    if not diarization_turns:
+        return segments
+
+    for seg in segments:
+        seg_start = seg.get("start_time", 0.0)
+        seg_end = seg.get("end_time", 0.0)
+        seg_duration = max(seg_end - seg_start, 0.001)
+
+        best_speaker = None
+        best_overlap = 0.0
+
+        for turn in diarization_turns:
+            turn_start = turn["start_time"]
+            turn_end = turn["end_time"]
+
+            # Calculate overlap
+            overlap_start = max(seg_start, turn_start)
+            overlap_end = min(seg_end, turn_end)
+            overlap = max(0.0, overlap_end - overlap_start)
+
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_speaker = turn["speaker_id"]
+
+        if best_speaker and best_overlap > seg_duration * 0.3:
+            seg["speaker_id"] = best_speaker
+        else:
+            # If no good overlap, assign "UNKNOWN"
+            seg["speaker_id"] = seg.get("speaker_id", "SPEAKER_UNKNOWN")
+
+    return segments
+
+
+# ── Gap-Based Speaker Detection (Fallback) ───────────────────────────────────
 
 def assign_speaker_ids(segments: list[dict],
                        gap_threshold: float = 2.0) -> list[dict]:
@@ -77,8 +256,7 @@ def assign_speaker_ids(segments: list[dict],
     When there is a silence gap longer than `gap_threshold` seconds between
     consecutive segments, we assume a different speaker is talking.
 
-    This is a practical first-version heuristic. For production-grade
-    diarization, swap in pyannote-audio here.
+    This is used as a fallback when pyannote-audio is not available.
 
     Args:
         segments: List of {"text", "start_time", "end_time"} dicts from Whisper.
@@ -113,10 +291,36 @@ def assign_speaker_ids(segments: list[dict],
 
     n_speakers = current_speaker + 1
     logger.info(
-        "Assigned %d speaker IDs to %d segments (gap_threshold=%.1fs)",
+        "Gap-based: assigned %d speaker IDs to %d segments (gap_threshold=%.1fs)",
         n_speakers, len(segments), gap_threshold
     )
     return segments
+
+
+# ── Combined Diarization Entry Point ─────────────────────────────────────────
+
+def diarize_and_assign(segments: list[dict], audio_path: str = None) -> list[dict]:
+    """
+    Main entry point for speaker diarization.
+
+    1. If audio_path is provided and pyannote is available, use pyannote diarization.
+    2. Otherwise, fall back to gap-based heuristic.
+
+    Args:
+        segments: Whisper ASR segments.
+        audio_path: Path to the audio file for pyannote diarization.
+
+    Returns:
+        segments with speaker_id assigned.
+    """
+    if audio_path and _is_pyannote_available():
+        turns = diarize_audio(audio_path)
+        if turns:
+            logger.info("Using pyannote diarization for speaker assignment.")
+            return align_segments_with_diarization(segments, turns)
+        logger.warning("Pyannote returned no turns, falling back to gap-based detection.")
+
+    return assign_speaker_ids(segments)
 
 
 # ── Rule-Based Role Detection ────────────────────────────────────────────────
@@ -176,6 +380,342 @@ def auto_detect_roles_for_segments(segments: list[dict]) -> list[dict]:
 
     logger.info("Auto-detected roles: %s", speaker_roles)
     return segments
+
+
+# ── Voiceprint Extraction ────────────────────────────────────────────────────
+
+_voice_encoder = None
+_resemblyzer_available = None
+
+
+def _is_resemblyzer_available() -> bool:
+    """Check if Resemblyzer is installed."""
+    global _resemblyzer_available
+    if _resemblyzer_available is not None:
+        return _resemblyzer_available
+    try:
+        from resemblyzer import VoiceEncoder
+        _resemblyzer_available = True
+    except ImportError:
+        _resemblyzer_available = False
+        logger.info("Resemblyzer not installed — voiceprint matching disabled.")
+    return _resemblyzer_available
+
+
+def _get_voice_encoder():
+    """Lazy-load the Resemblyzer voice encoder."""
+    global _voice_encoder
+    if _voice_encoder is not None:
+        return _voice_encoder
+
+    try:
+        from resemblyzer import VoiceEncoder
+        logger.info("Loading Resemblyzer voice encoder...")
+        _voice_encoder = VoiceEncoder()
+        logger.info("Resemblyzer voice encoder loaded.")
+        return _voice_encoder
+    except Exception as e:
+        logger.warning("Failed to load Resemblyzer: %s", e)
+        return None
+
+
+def extract_voiceprint(audio_path: str, start_time: float = 0.0,
+                       end_time: float = None) -> list[float]:
+    """
+    Extract a voiceprint embedding vector for a speaker from an audio segment.
+
+    Uses Resemblyzer (GE2E / ECAPA-TDNN equivalent) to produce a 256-dim
+    voice embedding vector from a segment of audio.
+
+    Args:
+        audio_path: Path to the full audio file.
+        start_time: Start time in seconds.
+        end_time: End time in seconds (None = to end).
+
+    Returns:
+        256-dimensional voiceprint vector, or empty list on failure.
+    """
+    if not _is_resemblyzer_available():
+        return []
+
+    encoder = _get_voice_encoder()
+    if encoder is None:
+        return []
+
+    try:
+        from resemblyzer import preprocess_wav
+        import numpy as np
+
+        wav = preprocess_wav(audio_path)
+        sr = 16000  # Resemblyzer expects 16kHz
+
+        # Slice to the speaker's segment
+        start_sample = int(start_time * sr)
+        end_sample = int(end_time * sr) if end_time else len(wav)
+        segment_wav = wav[start_sample:end_sample]
+
+        if len(segment_wav) < sr * 0.5:  # Need at least 0.5 seconds
+            return []
+
+        embedding = encoder.embed_utterance(segment_wav)
+        return embedding.tolist()
+    except Exception as e:
+        logger.warning("Voiceprint extraction failed: %s", e)
+        return []
+
+
+def extract_voiceprints_for_speakers(
+    audio_path: str,
+    segments: list[dict],
+) -> dict[str, list[float]]:
+    """
+    Extract voiceprint for each unique speaker by aggregating their speech segments.
+
+    For each speaker_id, concatenate all their speech segments and extract
+    a single voiceprint embedding.
+
+    Returns:
+        Dict of {speaker_id: voiceprint_vector}.
+    """
+    if not _is_resemblyzer_available():
+        return {}
+
+    encoder = _get_voice_encoder()
+    if encoder is None:
+        return {}
+
+    try:
+        from resemblyzer import preprocess_wav
+        import numpy as np
+
+        wav = preprocess_wav(audio_path)
+        sr = 16000
+
+        # Group segments by speaker
+        speaker_segments: dict[str, list[tuple[float, float]]] = {}
+        for seg in segments:
+            sid = seg.get("speaker_id")
+            if not sid:
+                continue
+            start = seg.get("start_time", 0.0)
+            end = seg.get("end_time", 0.0)
+            speaker_segments.setdefault(sid, []).append((start, end))
+
+        voiceprints = {}
+        for sid, time_ranges in speaker_segments.items():
+            # Concatenate all audio for this speaker
+            audio_chunks = []
+            for start, end in time_ranges:
+                start_sample = int(start * sr)
+                end_sample = int(end * sr)
+                chunk = wav[start_sample:end_sample]
+                if len(chunk) > 0:
+                    audio_chunks.append(chunk)
+
+            if not audio_chunks:
+                continue
+
+            combined = np.concatenate(audio_chunks)
+            if len(combined) < sr * 0.5:
+                continue
+
+            # Use embed_utterance for the combined audio
+            embedding = encoder.embed_utterance(combined)
+            voiceprints[sid] = embedding.tolist()
+
+        logger.info("Extracted voiceprints for %d speakers.", len(voiceprints))
+        return voiceprints
+    except Exception as e:
+        logger.warning("Voiceprint batch extraction failed: %s", e)
+        return {}
+
+
+# ── Cross-Session Speaker Matching ───────────────────────────────────────────
+
+def match_voiceprint_to_registry(
+    case_id: str,
+    voiceprint: list[float],
+    threshold: float = 0.75,
+) -> tuple[str | None, float]:
+    """
+    Compare a voiceprint against the speaker registry for a case.
+
+    Returns:
+        (canonical_name, similarity_score) if a match is found above threshold,
+        or (None, 0.0) if no match.
+    """
+    if not voiceprint:
+        return None, 0.0
+
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT canonical_name, voiceprint_blob FROM speaker_registry WHERE case_id = ?",
+        (case_id,)
+    ).fetchall()
+    conn.close()
+
+    best_name = None
+    best_score = 0.0
+
+    for row in rows:
+        stored_vp = _blob_to_vector(row["voiceprint_blob"])
+        if not stored_vp:
+            continue
+        score = _cosine_similarity(voiceprint, stored_vp)
+        if score > best_score:
+            best_score = score
+            best_name = row["canonical_name"]
+
+    if best_score >= threshold:
+        return best_name, best_score
+    return None, best_score
+
+
+def register_speaker(case_id: str, canonical_name: str, role: str = "unknown",
+                     voiceprint: list[float] = None) -> dict:
+    """
+    Register a new speaker in the case's speaker registry.
+
+    If a speaker with the same canonical_name already exists in this case,
+    update their voiceprint and role.
+    """
+    conn = _get_conn()
+    vp_blob = _vector_to_blob(voiceprint) if voiceprint else None
+
+    conn.execute(
+        """INSERT INTO speaker_registry (case_id, canonical_name, role, voiceprint_blob)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(case_id, canonical_name)
+           DO UPDATE SET role = excluded.role,
+                         voiceprint_blob = COALESCE(excluded.voiceprint_blob, voiceprint_blob)""",
+        (case_id, canonical_name, role.lower(), vp_blob)
+    )
+    conn.commit()
+    conn.close()
+
+    logger.info("Registered speaker '%s' (role=%s) in case %s", canonical_name, role, case_id)
+    return {"case_id": case_id, "canonical_name": canonical_name, "role": role}
+
+
+def map_local_speaker_to_canonical(
+    case_id: str,
+    video_id: str,
+    local_speaker_id: str,
+    canonical_name: str,
+    confidence: float = 0.0,
+    confirmed: bool = False,
+) -> dict:
+    """
+    Map a video-local speaker_id to a case-level canonical name.
+
+    This creates the link between e.g. video A's SPEAKER_0 and the
+    case-level canonical name "witness_john_doe".
+    """
+    conn = _get_conn()
+    conn.execute(
+        """INSERT INTO speaker_video_map
+           (case_id, video_id, local_speaker_id, canonical_name, confidence, confirmed_by_user)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(video_id, local_speaker_id)
+           DO UPDATE SET canonical_name = excluded.canonical_name,
+                         confidence = excluded.confidence,
+                         confirmed_by_user = excluded.confirmed_by_user""",
+        (case_id, video_id, local_speaker_id, canonical_name,
+         confidence, 1 if confirmed else 0)
+    )
+    conn.commit()
+    conn.close()
+
+    return {"video_id": video_id, "local_speaker_id": local_speaker_id,
+            "canonical_name": canonical_name}
+
+
+def get_canonical_name(video_id: str, local_speaker_id: str) -> str | None:
+    """Get the canonical name for a local speaker_id in a video."""
+    conn = _get_conn()
+    row = conn.execute(
+        """SELECT canonical_name FROM speaker_video_map
+           WHERE video_id = ? AND local_speaker_id = ?""",
+        (video_id, local_speaker_id)
+    ).fetchone()
+    conn.close()
+    return row["canonical_name"] if row else None
+
+
+def match_and_register_speakers(
+    case_id: str,
+    video_id: str,
+    audio_path: str,
+    segments: list[dict],
+    threshold: float = 0.75,
+) -> dict[str, str]:
+    """
+    Full cross-session speaker matching workflow:
+
+    1. Extract voiceprints for each speaker in this video.
+    2. Compare against the case's speaker registry.
+    3. If match found (above threshold): map local speaker → canonical name.
+    4. If no match: register as a new speaker in the registry.
+
+    Returns:
+        Dict of {local_speaker_id: canonical_name} mappings.
+    """
+    mappings = {}
+
+    # Step 1: Extract voiceprints
+    voiceprints = extract_voiceprints_for_speakers(audio_path, segments)
+
+    # Collect unique speakers and their roles
+    speaker_roles = {}
+    for seg in segments:
+        sid = seg.get("speaker_id")
+        if sid and sid not in speaker_roles:
+            speaker_roles[sid] = seg.get("role", "unknown")
+
+    # Step 2-4: Match or register each speaker
+    for local_sid, vp in voiceprints.items():
+        role = speaker_roles.get(local_sid, "unknown")
+
+        # Try to match against existing registry
+        canonical, score = match_voiceprint_to_registry(case_id, vp, threshold)
+
+        if canonical:
+            # Match found — map this video's speaker to the existing canonical name
+            logger.info(
+                "Voiceprint match: %s in video %s → '%s' (score=%.3f)",
+                local_sid, video_id, canonical, score
+            )
+            map_local_speaker_to_canonical(
+                case_id, video_id, local_sid, canonical,
+                confidence=score, confirmed=False
+            )
+            mappings[local_sid] = canonical
+        else:
+            # No match — register as new speaker
+            new_name = f"{role}_{local_sid}_{video_id[:6]}"
+            register_speaker(case_id, new_name, role=role, voiceprint=vp)
+            map_local_speaker_to_canonical(
+                case_id, video_id, local_sid, new_name,
+                confidence=1.0, confirmed=False
+            )
+            mappings[local_sid] = new_name
+            logger.info(
+                "New speaker registered: %s → '%s' (role=%s)",
+                local_sid, new_name, role
+            )
+
+    # Handle speakers without voiceprints
+    for local_sid in speaker_roles:
+        if local_sid not in mappings:
+            role = speaker_roles[local_sid]
+            new_name = f"{role}_{local_sid}_{video_id[:6]}"
+            map_local_speaker_to_canonical(
+                case_id, video_id, local_sid, new_name,
+                confidence=0.0, confirmed=False
+            )
+            mappings[local_sid] = new_name
+
+    return mappings
 
 
 # ── Manual Speaker Role Mapping ──────────────────────────────────────────────

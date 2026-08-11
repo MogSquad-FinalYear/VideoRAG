@@ -133,10 +133,12 @@ def scan_for_contradictions(case_id: str, video_id: str,
 
     detected = []
 
-    # Group new segments by speaker
+    # Group new segments by speaker — use canonical name (from voiceprint
+    # matching) when available, so cross-session comparisons work correctly
     speaker_segments: dict[str, list[dict]] = {}
     for seg in segments:
-        sid = seg.get("speaker_id", "SPEAKER_0")
+        # canonical_speaker is the cross-session stable name from voiceprint matching
+        sid = seg.get("canonical_speaker") or seg.get("speaker_id", "SPEAKER_0")
         speaker_segments.setdefault(sid, []).append(seg)
 
     for speaker_id, new_segs in speaker_segments.items():

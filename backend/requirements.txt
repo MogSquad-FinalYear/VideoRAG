@@ -32,3 +32,8 @@ groq>=0.13.0
 # Utilities
 numpy>=1.26.4
 aiofiles>=24.1.0
+
+# Speaker Diarization & Voiceprint (Phase 6 - Novelty 1)
+# Optional: system falls back to gap-based heuristic if not installed
+pyannote.audio>=3.1
+resemblyzer>=0.1.3

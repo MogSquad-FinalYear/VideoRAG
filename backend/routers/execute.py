@@ -196,11 +196,13 @@ def _process_video(task_id: str, video_path: str, video_id: str, case_id: str = 
             _update_task(task_id, message="Transcribing audio...", progress=current / total_steps)
             segments = transcription_service.transcribe_audio(audio_path)
 
-            # Phase 6: Assign speaker IDs and auto-detect roles
+            # Phase 6: Speaker diarization (pyannote → gap-based fallback) + role detection
             try:
                 from backend.services import speaker_service
-                segments = speaker_service.assign_speaker_ids(segments)
+                # Use pyannote if available, otherwise gap-based fallback
+                segments = speaker_service.diarize_and_assign(segments, audio_path=audio_path)
                 segments = speaker_service.auto_detect_roles_for_segments(segments)
+
                 # Store auto-detected roles
                 speaker_roles_seen = {}
                 for seg in segments:
@@ -209,6 +211,25 @@ def _process_video(task_id: str, video_path: str, video_id: str, case_id: str = 
                     if sid not in speaker_roles_seen:
                         speaker_roles_seen[sid] = role
                         speaker_service.set_speaker_role(video_id, sid, role)
+
+                # Cross-session voiceprint matching (Novelty 1, Steps 4-5)
+                if case_id:
+                    try:
+                        speaker_mappings = speaker_service.match_and_register_speakers(
+                            case_id=case_id,
+                            video_id=video_id,
+                            audio_path=audio_path,
+                            segments=segments,
+                        )
+                        # Update segments with canonical speaker names for testimony storage
+                        for seg in segments:
+                            local_sid = seg.get("speaker_id")
+                            if local_sid and local_sid in speaker_mappings:
+                                seg["canonical_speaker"] = speaker_mappings[local_sid]
+                        logger.info("Speaker matching complete: %s", speaker_mappings)
+                    except Exception as e:
+                        logger.warning("Voiceprint matching failed (non-fatal): %s", e)
+
                 logger.info("Speaker tagging complete: %d speakers detected", len(speaker_roles_seen))
             except Exception as e:
                 logger.warning("Speaker tagging failed (non-fatal): %s", e)

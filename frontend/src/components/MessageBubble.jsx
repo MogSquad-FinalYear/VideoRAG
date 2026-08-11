@@ -1,6 +1,7 @@
 /**
  * MessageBubble — Individual message display for user and AI messages.
- * Supports markdown rendering, image results with descriptions, and source tags.
+ * Supports markdown rendering, image results with descriptions, source tags,
+ * citation verification badges, and contradiction alerts.
  */
 import './MessageBubble.css';
 import { useState } from 'react';
@@ -50,6 +51,7 @@ export default function MessageBubble({ message, onClipClick }) {
   const isUser = message.role === 'user';
   const [brokenThumbs, setBrokenThumbs] = useState({});
   const [showMoreResults, setShowMoreResults] = useState(false);
+  const [showCitations, setShowCitations] = useState(false);
   const validClips = (message.clips || []).filter((clip) => {
     const path = clip?.frame_paths?.[0];
     return path && !brokenThumbs[path];
@@ -61,6 +63,9 @@ export default function MessageBubble({ message, onClipClick }) {
     const s = Math.floor(seconds % 60);
     return `${m}:${s.toString().padStart(2, '0')}`;
   };
+
+  const citations = message.citations || [];
+  const contradictions = message.contradictions || [];
 
   return (
     <div className={`msg ${isUser ? 'msg--user' : 'msg--ai'}`}>
@@ -101,6 +106,54 @@ export default function MessageBubble({ message, onClipClick }) {
             className="msg__text msg__text--markdown"
             dangerouslySetInnerHTML={{ __html: renderMarkdown(message.text) }}
           />
+        )}
+
+        {/* ── Contradiction Alerts (Novelty 2) ── */}
+        {contradictions.length > 0 && (
+          <div className="msg__contradictions">
+            <div className="msg__contradictions-header">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                <line x1="12" y1="9" x2="12" y2="13" />
+                <line x1="12" y1="17" x2="12.01" y2="17" />
+              </svg>
+              ⚠️ Testimony Contradictions Detected ({contradictions.length})
+            </div>
+            {contradictions.map((c, i) => (
+              <div key={c.contradiction_id || i} className="msg__contradiction-item">
+                <div className="msg__contradiction-speaker">
+                  <strong>{c.speaker_id || 'Unknown Speaker'}</strong>
+                  <span className={`msg__contradiction-conf msg__contradiction-conf--${
+                    c.confidence >= 0.8 ? 'high' : c.confidence >= 0.6 ? 'medium' : 'low'
+                  }`}>
+                    {Math.round((c.confidence || 0) * 100)}% confidence
+                  </span>
+                </div>
+                <div className="msg__contradiction-stmts">
+                  <div className="msg__contradiction-stmt">
+                    <span className="msg__contradiction-label">Session 1</span>
+                    {c.timestamp_a != null && (
+                      <span className="msg__timestamp">[{formatTimestamp(c.timestamp_a)}]</span>
+                    )}
+                    <p>"{c.statement_a}"</p>
+                  </div>
+                  <div className="msg__contradiction-vs">VS</div>
+                  <div className="msg__contradiction-stmt">
+                    <span className="msg__contradiction-label">Session 2</span>
+                    {c.timestamp_b != null && (
+                      <span className="msg__timestamp">[{formatTimestamp(c.timestamp_b)}]</span>
+                    )}
+                    <p>"{c.statement_b}"</p>
+                  </div>
+                </div>
+                {c.explanation && (
+                  <div className="msg__contradiction-explain">
+                    💡 {c.explanation}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
         )}
 
         {/* Image Results - Primary Display with Descriptions */}
@@ -192,6 +245,51 @@ export default function MessageBubble({ message, onClipClick }) {
           </div>
         )}
 
+        {/* ── Citation Verification (Novelty 3) ── */}
+        {citations.length > 0 && (
+          <div className="msg__citations">
+            <button
+              className="msg__citations-toggle"
+              onClick={() => setShowCitations(!showCitations)}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M9 11l3 3L22 4" />
+                <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
+              </svg>
+              Citation Verification ({citations.filter(c => c.verification_result === 'verified').length}/{citations.length} verified)
+              <span className="msg__citations-arrow">{showCitations ? '▲' : '▼'}</span>
+            </button>
+            {showCitations && (
+              <div className="msg__citations-list">
+                {citations.map((cite, i) => (
+                  <div key={cite.citation_id || i} className="msg__citation-item">
+                    <span className={`msg__citation-badge msg__citation-badge--${cite.verification_result || 'unverified'}`}>
+                      {cite.verification_result === 'verified' && '✅ Verified'}
+                      {cite.verification_result === 'uncertain' && '⚠️ Uncertain'}
+                      {cite.verification_result === 'unsupported' && '❌ Unsupported'}
+                      {!cite.verification_result && '❓ Unverified'}
+                    </span>
+                    <span className="msg__citation-ts">
+                      {cite.timestamp_text || `[${formatTimestamp(cite.timestamp)}]`}
+                    </span>
+                    <span className="msg__citation-score">
+                      {Math.round((cite.verification_score || 0) * 100)}% confidence
+                    </span>
+                    {cite.explanation && (
+                      <span className="msg__citation-explain">{cite.explanation}</span>
+                    )}
+                    {cite.clip_hash && (
+                      <span className="msg__citation-hash" title={`Clip hash: ${cite.clip_hash}`}>
+                        🔒 {cite.clip_hash}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Sources */}
         {message.sources && message.sources.length > 0 && (
           <div className="msg__sources">
@@ -202,6 +300,7 @@ export default function MessageBubble({ message, onClipClick }) {
                   {idx === 'caption' && '👁️ Caption Index'}
                   {idx === 'image' && '🖼️ Visual Index'}
                   {idx === 'speech' && '🎤 Speech Index'}
+                  {idx === 'ocr' && '📄 OCR Index'}
                 </span>
               ))}
             </div>

@@ -7,18 +7,25 @@ import UploadModal from './components/UploadModal';
 
 function App() {
   const [selectedVideoId, setSelectedVideoId] = useState(null);
+  const [selectedCaseId, setSelectedCaseId] = useState(null);
   const [showUpload, setShowUpload] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [activeClip, setActiveClip] = useState(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
-  const handleUploadComplete = () => {
+  const handleUploadComplete = (caseId) => {
     setShowUpload(false);
     setRefreshKey((k) => k + 1);
+    if (caseId) setSelectedCaseId(caseId);
   };
 
   const handleClipClick = (clip) => {
     setActiveClip(clip);
+  };
+
+  const handleSelectVideo = (videoId, caseId) => {
+    setSelectedVideoId(videoId);
+    if (caseId) setSelectedCaseId(caseId);
   };
 
   return (
@@ -27,7 +34,7 @@ function App() {
       <aside className={`app__sidebar ${sidebarCollapsed ? 'app__sidebar--collapsed' : ''}`}>
         <Sidebar
           selectedVideoId={selectedVideoId}
-          onSelectVideo={setSelectedVideoId}
+          onSelectVideo={handleSelectVideo}
           onUploadClick={() => setShowUpload(true)}
           refreshKey={refreshKey}
           collapsed={sidebarCollapsed}
@@ -40,6 +47,7 @@ function App() {
       <main className="app__main">
         <ChatWindow
           videoId={selectedVideoId}
+          caseId={selectedCaseId}
           onClipClick={handleClipClick}
         />
       </main>

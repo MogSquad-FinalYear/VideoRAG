@@ -308,3 +308,19 @@
   font-size: 0.75rem;
   color: var(--text-muted);
 }
+
+/* ── Case Badge ───────────────────────────────────────────────────────────── */
+.sidebar__case-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.65rem;
+  color: var(--accent-primary);
+  background: var(--accent-subtle);
+  padding: 1px 6px;
+  border-radius: 8px;
+  white-space: nowrap;
+  max-width: 100px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

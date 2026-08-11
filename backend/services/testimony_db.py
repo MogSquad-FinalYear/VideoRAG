@@ -116,9 +116,15 @@ def store_statements_batch(case_id: str, session_id: str, video_id: str,
 
         stmt_id = str(uuid.uuid4())[:12]
         stmt_ids.append(stmt_id)
+
+        # Use canonical speaker name (from voiceprint matching) if available,
+        # otherwise fall back to local speaker_id. This is critical for
+        # cross-session contradiction detection.
+        speaker_name = seg.get("canonical_speaker") or seg.get("speaker_id", "SPEAKER_0")
+
         rows.append((
             stmt_id, case_id, session_id, video_id,
-            seg.get("speaker_id", "SPEAKER_0"),
+            speaker_name,
             seg.get("role", "unknown"),
             round(seg.get("start_time", 0.0), 2),
             text,
