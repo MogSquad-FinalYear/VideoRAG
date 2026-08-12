@@ -184,6 +184,7 @@ Rules:
 - For text/reading questions, set ocr_query
 - For consistency/contradiction questions ("did the witness contradict", "testimony consistency", "changed their story"), set check_contradictions=true and answer_type="contradiction"
 - Always include visual_query and caption_query for general questions
+- Always include asr_query for general or description or contradiction questions — speech transcripts are the richest source of courtroom evidence
 - Use COCO class names for det_classes when possible (person, car, dog, cat, book, chair, etc.)
 """
 
@@ -577,11 +578,24 @@ def _merge_and_rearrange(query: str, sources: list[dict], structured_evidence: d
     asr = structured_evidence.get("asr_results", [])
     if asr:
         asr_lines = []
-        for seg in asr[:5]:
+        for seg in asr[:10]:  # Show more speech segments for richer context
             st = seg.get("start_time", 0)
             et = seg.get("end_time", 0)
             text = seg.get("content", "")
-            asr_lines.append(f"  - [{int(st)//60:02d}:{int(st)%60:02d} – {int(et)//60:02d}:{int(et)%60:02d}] \"{text}\"")
+            speaker = seg.get("speaker_id", "")
+            role = seg.get("role", "")
+            vid = seg.get("video_id", "")
+
+            speaker_label = ""
+            if speaker and role and role != "unknown":
+                speaker_label = f" [{role.upper()} / {speaker}]"
+            elif speaker:
+                speaker_label = f" [{speaker}]"
+
+            asr_lines.append(
+                f"  - [{int(st)//60:02d}:{int(st)%60:02d} – {int(et)//60:02d}:{int(et)%60:02d}]"
+                f"{speaker_label} (video {vid}): \"{text}\""
+            )
         context_parts.append("## Speech/Transcript Evidence\n" + "\n".join(asr_lines))
 
     # OCR evidence
@@ -687,26 +701,40 @@ Search strategies used: {', '.join(strategies)}
 Based on the above evidence, provide a clear, professional answer to the user's query."""
 
     if not GROQ_API_KEY or not context_parts:
+        logger.warning("Skipping LLM synthesis: GROQ_API_KEY=%s, context_parts=%d",
+                       bool(GROQ_API_KEY), len(context_parts))
         return _render_answer_fallback(query, sources, strategies, video_id, is_image_search,
                                         structured_evidence)
 
-    try:
-        client = _get_groq_client()
-        result = client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.1,
-            max_tokens=1000,
-        )
-        text = result.choices[0].message.content
-        if text:
-            return text
-    except Exception as e:
-        logger.warning(f"Final answer generation failed: {e}")
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
 
+    # Try primary model, then fallback model
+    models_to_try = [GROQ_MODEL, "llama-3.3-70b-versatile"]
+    for model_name in models_to_try:
+        try:
+            client = _get_groq_client()
+            logger.info("Generating final answer with model: %s (prompt length: %d chars)",
+                        model_name, len(user_prompt))
+            result = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=0.1,
+                max_tokens=1500,
+            )
+            text = result.choices[0].message.content
+            if text and text.strip():
+                logger.info("LLM answer generated successfully with %s (%d chars)",
+                            model_name, len(text))
+                return text
+            logger.warning("LLM returned empty response with model %s", model_name)
+        except Exception as e:
+            logger.error("LLM answer generation failed with model %s: %s", model_name, e,
+                         exc_info=True)
+
+    logger.warning("All LLM models failed, using fallback answer rendering.")
     return _render_answer_fallback(query, sources, strategies, video_id, is_image_search,
                                     structured_evidence)
 
@@ -730,20 +758,80 @@ def _format_timestamp(hit: dict) -> str:
 def _render_answer_fallback(query: str, sources: list[dict], strategies: list[str],
                              video_id: str = None, is_image_search: bool = False,
                              structured_evidence: dict = None) -> str:
-    """Build a readable text answer when LLM is unavailable."""
+    """Build a readable text answer when LLM is unavailable.
+
+    Prioritizes synthesized content from speech transcripts over raw frame matches.
+    """
     if not sources and not structured_evidence:
         scope = f" in video {video_id}" if video_id else ""
-        return f"I could not find strong evidence matches for this query{scope}. Try a more specific object, person, or spoken phrase."
+        return (f"I could not find strong evidence matches for this query{scope}. "
+                "Try a more specific question about what was said, who was speaking, "
+                "or what objects appeared in the video.")
 
-    lines = [f"### Analysis for: \"{query}\""]
-    lines.append(f"Search strategies: {', '.join(sorted(set(strategies)))}")
-    lines.append("")
+    lines = []
 
-    # Show detection counts if available
+    # ── Contradiction evidence (highest priority for legal questions) ─────
+    if structured_evidence:
+        contradictions = structured_evidence.get("contradiction_results", [])
+        if contradictions:
+            lines.append("### ⚠️ Testimony Contradictions Detected")
+            lines.append("")
+            for i, c in enumerate(contradictions[:5]):
+                speaker = c.get("speaker_id", "Unknown Speaker")
+                conf = c.get("confidence", 0)
+                stmt_a = c.get("stmt_a_text", "")
+                stmt_b = c.get("stmt_b_text", "")
+                ts_a = c.get("stmt_a_timestamp", 0)
+                ts_b = c.get("stmt_b_timestamp", 0)
+                vid_a = c.get("stmt_a_video_id", "")
+                vid_b = c.get("stmt_b_video_id", "")
+                lines.append(f"**Contradiction {i+1}** — Speaker: **{speaker}** (Confidence: {conf:.0%})")
+                lines.append(f"- **Session 1** [{int(ts_a)//60:02d}:{int(ts_a)%60:02d}] (video `{vid_a}`):")
+                lines.append(f'  > "{stmt_a}"')
+                lines.append(f"- **Session 2** [{int(ts_b)//60:02d}:{int(ts_b)%60:02d}] (video `{vid_b}`):")
+                lines.append(f'  > "{stmt_b}"')
+                explanation = c.get("explanation", "")
+                if explanation:
+                    lines.append(f"- **Analysis**: {explanation}")
+                lines.append("")
+        elif any("contradiction" in s.lower() for s in strategies):
+            lines.append("### ✅ No Testimony Contradictions Found")
+            lines.append("No conflicting statements were detected across the uploaded sessions for this case.")
+            lines.append("")
+
+    # ── Speech/transcript evidence (most valuable for courtroom analysis) ─
+    if structured_evidence:
+        asr = structured_evidence.get("asr_results", [])
+        if asr:
+            lines.append("### 🎙️ Relevant Speech/Testimony")
+            lines.append("")
+            for seg in asr[:8]:
+                st = seg.get("start_time", 0)
+                et = seg.get("end_time", 0)
+                text = seg.get("content", "")
+                speaker = seg.get("speaker_id", "")
+                role = seg.get("role", "")
+                vid = seg.get("video_id", "")
+
+                ts_str = f"[{int(st)//60:02d}:{int(st)%60:02d} – {int(et)//60:02d}:{int(et)%60:02d}]"
+                speaker_label = ""
+                if speaker and role and role != "unknown":
+                    speaker_label = f"**{role.title()}** ({speaker})"
+                elif speaker:
+                    speaker_label = f"**{speaker}**"
+
+                if speaker_label:
+                    lines.append(f"- {ts_str} {speaker_label} (video `{vid}`):")
+                    lines.append(f'  > "{text}"')
+                else:
+                    lines.append(f'- {ts_str}: "{text}"')
+            lines.append("")
+
+    # ── Detection/relation evidence ──────────────────────────────────────
     if structured_evidence:
         det = structured_evidence.get("detection_results", {})
         if det:
-            lines.append("### Object Counts")
+            lines.append("### 🔍 Object Detection")
             for cls, result in det.items():
                 if isinstance(result, dict):
                     counts = result.get("counts", {})
@@ -753,26 +841,32 @@ def _render_answer_fallback(query: str, sources: list[dict], strategies: list[st
 
         rels = structured_evidence.get("relation_results", [])
         if rels:
-            lines.append("### Object Relations")
+            lines.append("### 🔗 Spatial Relations")
             for rel in rels[:5]:
                 lines.append(f"- {rel.get('triple', '')}")
             lines.append("")
 
-    # Show top matches
-    display_sources = sources[:5] if is_image_search else sources[:3]
-    for i, hit in enumerate(display_sources):
-        vid = hit.get("video_id", "")
-        time_str = _format_timestamp(hit)
-        desc = hit.get("description", hit.get("content", ""))
-        score = hit.get("score", 0)
-        source_idx = hit.get("source_index", "")
+    # ── Visual/caption evidence (only show if we don't have better data) ─
+    has_rich_evidence = bool(lines)  # We already have transcripts/contradictions
+    if not has_rich_evidence or is_image_search:
+        display_sources = sources[:5] if is_image_search else sources[:3]
+        if display_sources:
+            lines.append("### 🎬 Visual Evidence")
+            lines.append("")
+            for i, hit in enumerate(display_sources):
+                vid = hit.get("video_id", "")
+                time_str = _format_timestamp(hit)
+                desc = hit.get("description", hit.get("content", ""))
+                score = hit.get("score", 0)
+                source_idx = hit.get("source_index", "")
 
-        lines.append(f"### Match {i+1}")
-        lines.append(f"- **Timestamp**: {time_str} in video `{vid}`")
-        lines.append(f"- **Confidence**: {score:.1%} ({source_idx} index)")
-        if desc:
-            lines.append(f"- **Description**: {desc}")
-        lines.append("")
+                lines.append(f"**Match {i+1}** — {time_str} in video `{vid}` ({score:.0%} confidence, {source_idx})")
+                if desc:
+                    lines.append(f"- {desc}")
+                lines.append("")
+
+    if not lines:
+        return f"I found some potential matches but could not synthesize a clear answer for: \"{query}\""
 
     return "\n".join(lines)
 
@@ -823,6 +917,26 @@ def run_agent(query: str, video_id: str = None, image_path: str = None,
             decouple["check_contradictions"] = True
             if decouple.get("answer_type") == "general":
                 decouple["answer_type"] = "contradiction"
+
+        # Heuristic: always search transcripts for courtroom analysis
+        # Speech is the richest evidence source for legal video
+        if not decouple.get("asr_query"):
+            courtroom_keywords = [
+                "speaker", "said", "say", "speak", "spoke", "told", "tell",
+                "testif", "witness", "judge", "counsel", "lawyer", "attorney",
+                "argument", "hearing", "proceed", "case", "court", "trial",
+                "contradict", "testimony", "objection", "ruling", "verdict",
+                "what happened", "what was discussed", "who",
+            ]
+            if any(kw in q_lower for kw in courtroom_keywords):
+                decouple["asr_query"] = query
+
+        # Final fallback: if LLM didn't set asr_query and it's a general query,
+        # always search transcripts too — courtroom video analysis needs speech
+        if not decouple.get("asr_query") and decouple.get("answer_type") in ("general", "description", "contradiction"):
+            decouple["asr_query"] = query
+
+        logger.info("Final decouple: %s", json.dumps(decouple, indent=2))
 
     # ── Stage ②: Multimodal Retrieval ────────────────────────────────────
     sources, strategies, structured_evidence = _collect_sources_decoupled(

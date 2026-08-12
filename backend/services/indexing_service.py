@@ -441,6 +441,8 @@ def search_transcripts(query_text: str, n: int = 10, video_id: str = None) -> li
                 "video_id": meta.get("video_id", ""),
                 "start_time": meta.get("start_time"),
                 "end_time": meta.get("end_time"),
+                "speaker_id": meta.get("speaker_id", ""),
+                "role": meta.get("role", ""),
                 "content": doc,
                 "source_index": "speech",
             })
