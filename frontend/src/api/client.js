@@ -126,6 +126,82 @@ export async function deleteVideo(videoId) {
 }
 
 /**
+ * Get speaker-to-role mappings for a video.
+ * @param {string} videoId
+ * @returns {Promise<{video_id, speakers}>}
+ */
+export async function getSpeakerRoles(videoId) {
+  const res = await fetch(`${API_BASE}/videos/${videoId}/speakers`);
+  if (!res.ok) throw new Error(`Failed to fetch speaker roles: ${res.statusText}`);
+  return res.json();
+}
+
+/**
+ * Set speaker-to-role mappings for a video.
+ * @param {string} videoId
+ * @param {Array<{speaker_id: string, role: string, label?: string}>} mappings
+ * @returns {Promise<{video_id, updated}>}
+ */
+export async function setSpeakerRoles(videoId, mappings) {
+  const res = await fetch(`${API_BASE}/videos/${videoId}/speakers`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mappings }),
+  });
+  if (!res.ok) throw new Error(`Failed to set speaker roles: ${res.statusText}`);
+  return res.json();
+}
+
+/**
+ * Get pending cross-session voiceprint matches for a case, awaiting human confirmation.
+ * @param {string} caseId
+ * @returns {Promise<{case_id, pending, all_speakers}>}
+ */
+export async function getSpeakerMatches(caseId) {
+  const res = await fetch(`${API_BASE}/cases/${caseId}/speaker-matches`);
+  if (!res.ok) throw new Error(`Failed to fetch speaker matches: ${res.statusText}`);
+  return res.json();
+}
+
+/**
+ * Confirm or correct a cross-session voiceprint match.
+ * @param {string} caseId
+ * @param {{video_id: string, local_speaker_id: string, action: 'confirm'|'rename', corrected_name?: string, role?: string}} payload
+ * @returns {Promise<{case_id, result}>}
+ */
+export async function confirmSpeakerMatch(caseId, payload) {
+  const res = await fetch(`${API_BASE}/cases/${caseId}/speaker-matches/confirm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`Failed to confirm speaker match: ${res.statusText}`);
+  return res.json();
+}
+
+/**
+ * Get all testimony statements for a case across sessions.
+ * @param {string} caseId
+ * @returns {Promise<{case_id, total_statements, statements}>}
+ */
+export async function getCaseTestimony(caseId) {
+  const res = await fetch(`${API_BASE}/cases/${caseId}/testimony`);
+  if (!res.ok) throw new Error(`Failed to fetch testimony: ${res.statusText}`);
+  return res.json();
+}
+
+/**
+ * Get detected contradictions for a case.
+ * @param {string} caseId
+ * @returns {Promise<{case_id, total_contradictions, contradictions}>}
+ */
+export async function getCaseContradictions(caseId) {
+  const res = await fetch(`${API_BASE}/cases/${caseId}/contradictions`);
+  if (!res.ok) throw new Error(`Failed to fetch contradictions: ${res.statusText}`);
+  return res.json();
+}
+
+/**
  * Poll task status until completion or failure.
  * @param {string} taskId
  * @param {function} onUpdate - called with each status update

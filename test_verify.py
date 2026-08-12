@@ -3,11 +3,13 @@ import sys
 import os
 import traceback
 import logging
+from pathlib import Path
 
 # Suppress logging to keep output clean
 logging.disable(logging.CRITICAL)
 
-output_file = "d:/VideoRAG/test_output.txt"
+ROOT_DIR = Path(__file__).resolve().parent
+output_file = str(ROOT_DIR / "test_output.txt")
 f = open(output_file, "w", encoding="utf-8")
 
 def p(msg):
@@ -47,10 +49,11 @@ except Exception as e:
 
 # Test 3: Test CLIP description function
 p("\n[3] Testing CLIP frame description...")
+frame_dirs = []
 try:
-    from pathlib import Path
-    frames_dir = Path("d:/VideoRAG/data/frames")
-    frame_dirs = [d for d in frames_dir.iterdir() if d.is_dir()]
+    from backend.config import FRAMES_DIR
+    frames_dir = Path(FRAMES_DIR)
+    frame_dirs = [d for d in frames_dir.iterdir() if d.is_dir()] if frames_dir.exists() else []
     if frame_dirs:
         first_dir = frame_dirs[0]
         frame_files = sorted(first_dir.glob("frame_*.jpg"))

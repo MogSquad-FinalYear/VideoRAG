@@ -14,6 +14,7 @@ export default function Sidebar({
   collapsed,
   onToggleCollapse,
   onDeleteVideo,
+  onOpenCasePanel,
 }) {
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -186,7 +187,14 @@ export default function Sidebar({
                     <span>{formatDuration(video.duration)}</span>
                     {video.resolution && <span>{video.resolution}</span>}
                     {video.case_id && (
-                      <span className="sidebar__case-badge" title={`Case: ${video.case_id}`}>
+                      <span
+                        className="sidebar__case-badge"
+                        title={`Open case: ${video.case_id}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenCasePanel?.(video.case_id);
+                        }}
+                      >
                         📁 {video.case_id}
                       </span>
                     )}

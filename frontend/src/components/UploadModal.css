@@ -253,6 +253,13 @@
   font-family: var(--font-mono);
 }
 
+.upload-modal__captions-note {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-style: italic;
+  margin-top: 4px;
+}
+
 /* ── Error ─────────────────────────────────────────────────────────────────── */
 .upload-modal__error {
   display: flex;

@@ -13,7 +13,6 @@ import logging
 from pathlib import Path
 
 from backend.config import GROQ_API_KEY, GROQ_MODEL, FRAMES_DIR
-from backend.agent.tools import TOOL_DEFINITIONS
 from backend.services import indexing_service, embedding_service
 
 logger = logging.getLogger(__name__)
@@ -76,11 +75,12 @@ def _url_to_fs_path(frame_url: str) -> str | None:
 def _enrich_with_descriptions(sources: list[dict], max_describe: int = 2) -> list[dict]:
     """Enrich the top N search results with detailed descriptions.
 
-    Strategy (fast-first, memory-safe):
+    Strategy (BLIP-first, matching the indexing-time CAPTION_BACKEND default):
     1. If source already has a meaningful 'content' (from caption index), use it.
     2. Otherwise, look up stored caption from the caption index for that frame.
-    3. Try CLIP-based label description (fast, always available since CLIP is loaded).
-    4. Try BLIP on-demand (last resort, memory-intensive).
+    3. Try BLIP on-demand for a real generated caption.
+    4. Fall back to CLIP-label description only if BLIP is unavailable/fails
+       (e.g. memory-constrained environment).
     5. Fallback: generate from metadata.
     """
     described = 0
@@ -114,8 +114,23 @@ def _enrich_with_descriptions(sources: list[dict], max_describe: int = 2) -> lis
                 described += 1
                 continue
 
-        # ── Step 3: CLIP-based label description (fast, reliable) ─────────────
+        # ── Step 3: Try BLIP on-demand (real generated caption, plan default) ──
         fs_path = _url_to_fs_path(frame_path)
+        if fs_path:
+            try:
+                from backend.services.captioning_service import describe_frame_detailed
+                detailed = describe_frame_detailed(fs_path)
+                if detailed:
+                    src["description"] = detailed
+                    src["content"] = detailed
+                    described += 1
+                    continue
+            except (MemoryError, OSError) as e:
+                logger.warning(f"BLIP skipped (memory), falling back to CLIP: {e}")
+            except Exception as e:
+                logger.warning(f"BLIP description failed for {fs_path}, falling back to CLIP: {e}")
+
+        # ── Step 4: CLIP-based label description (fallback only) ──────────────
         if fs_path:
             try:
                 from backend.services.captioning_service import describe_frame_clip
@@ -127,21 +142,6 @@ def _enrich_with_descriptions(sources: list[dict], max_describe: int = 2) -> lis
                     continue
             except Exception as e:
                 logger.warning(f"CLIP description failed for {fs_path}: {e}")
-
-        # ── Step 4: Try BLIP on-demand (memory-intensive) ─────────────────────
-        if fs_path:
-            try:
-                from backend.services.captioning_service import describe_frame_detailed
-                detailed = describe_frame_detailed(fs_path)
-                if detailed:
-                    src["description"] = detailed
-                    src["content"] = detailed
-                    described += 1
-                    continue
-            except (MemoryError, OSError) as e:
-                logger.warning(f"BLIP skipped (memory): {e}")
-            except Exception as e:
-                logger.warning(f"BLIP description failed for {fs_path}: {e}")
 
         # ── Step 5: Fallback — generate from metadata ─────────────────────────
         ts = src.get("timestamp")
@@ -304,7 +304,7 @@ def _execute_tool(tool_name: str, args: dict) -> str:
 
             # Bug #5 fix: use real timestamps from ChromaDB metadata
             try:
-                image_col, _, _ = indexing_service.get_collections()
+                image_col, _, _, _ = indexing_service.get_collections()
                 results = image_col.get(
                     where={"video_id": video_id},
                     include=["metadatas"],
@@ -468,14 +468,20 @@ def _collect_sources_decoupled(query: str, decouple: dict, video_id: str = None,
             sources.extend(visual_hits)
 
     if decouple.get("caption_query"):
-        used_strategies.append("caption-search")
-        caption_hits = json.loads(_execute_tool("search_by_caption", {
-            "query": decouple["caption_query"],
-            "video_id": video_id,
-            "n": 12,
-        }))
-        if isinstance(caption_hits, list):
-            sources.extend(caption_hits)
+        if video_id and not indexing_service.is_captions_ready(video_id):
+            # Bug #4: caption indexing still running in the background for
+            # this video — skip caption search rather than silently querying
+            # a partially-populated collection.
+            structured_evidence["captions_pending"] = True
+        else:
+            used_strategies.append("caption-search")
+            caption_hits = json.loads(_execute_tool("search_by_caption", {
+                "query": decouple["caption_query"],
+                "video_id": video_id,
+                "n": 12,
+            }))
+            if isinstance(caption_hits, list):
+                sources.extend(caption_hits)
 
     # ── OCR search ───────────────────────────────────────────────────────
     if decouple.get("ocr_query"):
@@ -560,6 +566,12 @@ def _merge_and_rearrange(query: str, sources: list[dict], structured_evidence: d
     """
     # Build structured context from all sub-systems
     context_parts = []
+
+    if structured_evidence.get("captions_pending"):
+        context_parts.append(
+            "## Note\nCaption indexing for this video is still in progress; "
+            "visual/caption descriptions below may be incomplete."
+        )
 
     # Frame-level evidence (captions, visual descriptions)
     if sources:
@@ -769,6 +781,13 @@ def _render_answer_fallback(query: str, sources: list[dict], strategies: list[st
                 "or what objects appeared in the video.")
 
     lines = []
+
+    if structured_evidence and structured_evidence.get("captions_pending"):
+        lines.append(
+            "*Note: caption indexing for this video is still in progress; "
+            "visual descriptions below may be incomplete.*"
+        )
+        lines.append("")
 
     # ── Contradiction evidence (highest priority for legal questions) ─────
     if structured_evidence:

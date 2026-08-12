@@ -83,6 +83,7 @@ def _get_conn() -> sqlite3.Connection:
                 canonical_name TEXT NOT NULL,
                 confidence REAL DEFAULT 0.0,
                 confirmed_by_user INTEGER DEFAULT 0,
+                voiceprint_blob BLOB,
                 UNIQUE(video_id, local_speaker_id)
             );
             CREATE INDEX IF NOT EXISTS idx_svm_video
@@ -90,6 +91,14 @@ def _get_conn() -> sqlite3.Connection:
             CREATE INDEX IF NOT EXISTS idx_svm_case
                 ON speaker_video_map(case_id);
         """)
+        # Defensive migration: speaker_video_map may already exist from a
+        # prior run without this column (CREATE TABLE IF NOT EXISTS won't
+        # add it to an existing table).
+        try:
+            conn.execute("ALTER TABLE speaker_video_map ADD COLUMN voiceprint_blob BLOB")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
         _db_initialized = True
         logger.info("Speaker roles + registry tables initialized.")
 
@@ -151,12 +160,16 @@ def _get_diarization_pipeline():
 
     try:
         from pyannote.audio import Pipeline
+        import inspect
         import os
         hf_token = os.environ.get("HF_TOKEN", "")
         logger.info("Loading pyannote diarization pipeline...")
+        # pyannote.audio 4.x renamed from_pretrained's auth kwarg from
+        # use_auth_token to token; support both installed API generations.
+        kwarg_name = "token" if "token" in inspect.signature(Pipeline.from_pretrained).parameters else "use_auth_token"
         _diarization_pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
-            use_auth_token=hf_token if hf_token else None,
+            **{kwarg_name: hf_token if hf_token else None},
         )
         logger.info("Pyannote diarization pipeline loaded successfully.")
         return _diarization_pipeline
@@ -516,6 +529,17 @@ def extract_voiceprints_for_speakers(
                 continue
 
             combined = np.concatenate(audio_chunks)
+
+            # Cap total audio fed to the encoder in one call. A long
+            # courtroom session can give one speaker 10+ minutes of
+            # concatenated audio, which both OOMs embed_utterance() on
+            # a modest GPU and buys no real accuracy — GE2E voice
+            # embeddings are trained on short utterances, so ~45s of
+            # clean speech is already enough for a robust voiceprint.
+            max_samples = 45 * sr
+            if len(combined) > max_samples:
+                combined = combined[:max_samples]
+
             if len(combined) < sr * 0.5:
                 continue
 
@@ -604,24 +628,31 @@ def map_local_speaker_to_canonical(
     canonical_name: str,
     confidence: float = 0.0,
     confirmed: bool = False,
+    voiceprint: list[float] = None,
 ) -> dict:
     """
     Map a video-local speaker_id to a case-level canonical name.
 
     This creates the link between e.g. video A's SPEAKER_0 and the
-    case-level canonical name "witness_john_doe".
+    case-level canonical name "witness_john_doe". When provided, the local
+    speaker's own voiceprint is stored alongside the mapping so a later
+    human correction (see confirm_speaker_match) can re-register it under a
+    different canonical identity without re-running diarization.
     """
     conn = _get_conn()
+    vp_blob = _vector_to_blob(voiceprint) if voiceprint else None
     conn.execute(
         """INSERT INTO speaker_video_map
-           (case_id, video_id, local_speaker_id, canonical_name, confidence, confirmed_by_user)
-           VALUES (?, ?, ?, ?, ?, ?)
+           (case_id, video_id, local_speaker_id, canonical_name, confidence,
+            confirmed_by_user, voiceprint_blob)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(video_id, local_speaker_id)
            DO UPDATE SET canonical_name = excluded.canonical_name,
                          confidence = excluded.confidence,
-                         confirmed_by_user = excluded.confirmed_by_user""",
+                         confirmed_by_user = excluded.confirmed_by_user,
+                         voiceprint_blob = COALESCE(excluded.voiceprint_blob, voiceprint_blob)""",
         (case_id, video_id, local_speaker_id, canonical_name,
-         confidence, 1 if confirmed else 0)
+         confidence, 1 if confirmed else 0, vp_blob)
     )
     conn.commit()
     conn.close()
@@ -687,7 +718,7 @@ def match_and_register_speakers(
             )
             map_local_speaker_to_canonical(
                 case_id, video_id, local_sid, canonical,
-                confidence=score, confirmed=False
+                confidence=score, confirmed=False, voiceprint=vp,
             )
             mappings[local_sid] = canonical
         else:
@@ -696,7 +727,7 @@ def match_and_register_speakers(
             register_speaker(case_id, new_name, role=role, voiceprint=vp)
             map_local_speaker_to_canonical(
                 case_id, video_id, local_sid, new_name,
-                confidence=1.0, confirmed=False
+                confidence=1.0, confirmed=False, voiceprint=vp,
             )
             mappings[local_sid] = new_name
             logger.info(
@@ -716,6 +747,114 @@ def match_and_register_speakers(
             mappings[local_sid] = new_name
 
     return mappings
+
+
+# ── Speaker Match Confirmation (Novelty 1, Step 5) ───────────────────────────
+#
+# match_and_register_speakers() auto-matches voiceprints across sessions, but
+# the plan requires a human-in-the-loop confirmation before that match is
+# trusted downstream by contradiction detection. These functions expose the
+# pending auto-matches for a case and let a user confirm or correct them.
+
+def get_pending_matches(case_id: str) -> list[dict]:
+    """Get all speaker_video_map rows for a case not yet confirmed by a user."""
+    conn = _get_conn()
+    rows = conn.execute(
+        """SELECT video_id, local_speaker_id, canonical_name, confidence, confirmed_by_user
+           FROM speaker_video_map
+           WHERE case_id = ? AND confirmed_by_user = 0
+           ORDER BY video_id, local_speaker_id""",
+        (case_id,)
+    ).fetchall()
+    conn.close()
+
+    results = []
+    conn = _get_conn()
+    for row in rows:
+        reg_row = conn.execute(
+            "SELECT role FROM speaker_registry WHERE case_id = ? AND canonical_name = ?",
+            (case_id, row["canonical_name"])
+        ).fetchone()
+        results.append({
+            "video_id": row["video_id"],
+            "local_speaker_id": row["local_speaker_id"],
+            "canonical_name": row["canonical_name"],
+            "confidence": row["confidence"],
+            "role": reg_row["role"] if reg_row else "unknown",
+            "confirmed_by_user": bool(row["confirmed_by_user"]),
+        })
+    conn.close()
+    return results
+
+
+def list_case_speakers(case_id: str) -> list[dict]:
+    """List all canonical speakers registered for a case."""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT canonical_name, role FROM speaker_registry WHERE case_id = ? ORDER BY canonical_name",
+        (case_id,)
+    ).fetchall()
+    conn.close()
+    return [{"canonical_name": r["canonical_name"], "role": r["role"]} for r in rows]
+
+
+def confirm_speaker_match(
+    case_id: str,
+    video_id: str,
+    local_speaker_id: str,
+    action: str,
+    corrected_name: str = None,
+    role: str = None,
+) -> dict:
+    """
+    Human-in-the-loop confirmation/correction of a cross-session voiceprint match.
+
+    action="confirm": accept the existing auto-match as-is, mark confirmed.
+    action="rename": the auto-match was wrong — reassign this local speaker to
+        `corrected_name`. If that name already exists in the case's registry,
+        relink to it (merging in this local speaker's stored voiceprint to
+        improve future matching). Otherwise register it as a brand-new speaker
+        using the voiceprint captured at match time.
+    """
+    conn = _get_conn()
+    row = conn.execute(
+        """SELECT canonical_name, confidence, voiceprint_blob FROM speaker_video_map
+           WHERE video_id = ? AND local_speaker_id = ?""",
+        (video_id, local_speaker_id)
+    ).fetchone()
+    conn.close()
+
+    if row is None:
+        raise ValueError(f"No speaker mapping found for video={video_id}, speaker={local_speaker_id}")
+
+    stored_vp = _blob_to_vector(row["voiceprint_blob"]) if row["voiceprint_blob"] else None
+
+    if action == "confirm":
+        return map_local_speaker_to_canonical(
+            case_id, video_id, local_speaker_id, row["canonical_name"],
+            confidence=row["confidence"], confirmed=True, voiceprint=stored_vp,
+        )
+
+    if action == "rename":
+        if not corrected_name:
+            raise ValueError("corrected_name is required for action='rename'")
+
+        conn = _get_conn()
+        existing = conn.execute(
+            "SELECT canonical_name, role FROM speaker_registry WHERE case_id = ? AND canonical_name = ?",
+            (case_id, corrected_name)
+        ).fetchone()
+        conn.close()
+
+        final_role = role or (existing["role"] if existing else "unknown")
+        register_speaker(case_id, corrected_name, role=final_role, voiceprint=stored_vp)
+
+        return map_local_speaker_to_canonical(
+            case_id, video_id, local_speaker_id, corrected_name,
+            confidence=1.0, confirmed=True, voiceprint=stored_vp,
+        )
+
+    raise ValueError(f"Unknown action: {action!r} (expected 'confirm' or 'rename')")
 
 
 # ── Manual Speaker Role Mapping ──────────────────────────────────────────────
@@ -761,6 +900,23 @@ def get_speaker_roles(video_id: str) -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def delete_video_speakers(video_id: str):
+    """Remove a video's speaker footprint: its role labels and its
+    local-speaker-to-canonical-name mappings.
+
+    Deliberately does NOT touch speaker_registry — a canonical identity may
+    still be legitimately referenced by that speaker's OTHER videos in the
+    same case, and their voiceprint should stay available for future
+    cross-session matching even after this one video is deleted.
+    """
+    conn = _get_conn()
+    conn.execute("DELETE FROM speaker_roles WHERE video_id = ?", (video_id,))
+    conn.execute("DELETE FROM speaker_video_map WHERE video_id = ?", (video_id,))
+    conn.commit()
+    conn.close()
+    logger.info("Deleted speaker roles/mappings for video %s", video_id)
 
 
 def get_speaker_role(video_id: str, speaker_id: str) -> str:

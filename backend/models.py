@@ -114,3 +114,20 @@ class SpeakerRoleMapping(BaseModel):
 
 class SpeakerRoleMappingRequest(BaseModel):
     mappings: list[SpeakerRoleMapping]
+
+
+class SpeakerMatch(BaseModel):
+    video_id: str
+    local_speaker_id: str
+    canonical_name: str
+    confidence: float = 0.0
+    role: str = "unknown"
+    confirmed_by_user: bool = False
+
+
+class SpeakerMatchConfirmRequest(BaseModel):
+    video_id: str
+    local_speaker_id: str
+    action: str  # "confirm" | "rename"
+    corrected_name: Optional[str] = None
+    role: Optional[str] = None

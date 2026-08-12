@@ -3,7 +3,7 @@
  * Includes case_id field for cross-session testimony memory.
  */
 import { useState, useRef, useCallback } from 'react';
-import { uploadVideo, pollTaskStatus } from '../api/client';
+import { uploadVideo, pollTaskStatus, getSpeakerMatches } from '../api/client';
 import './UploadModal.css';
 
 const ALLOWED_TYPES = ['video/mp4', 'video/avi', 'video/quicktime', 'video/x-matroska', 'video/webm', 'video/x-flv', 'video/x-ms-wmv'];
@@ -77,8 +77,19 @@ export default function UploadModal({ onClose, onUploadComplete }) {
         setProcessStatus(status);
       });
 
-      // Processing complete — pass case_id back
-      onUploadComplete(result.case_id || caseId.trim() || null);
+      // Processing complete — check whether the cross-session speaker
+      // matcher (Novelty 1) left anything awaiting human confirmation.
+      const finalCaseId = result.case_id || caseId.trim() || null;
+      let hasPendingMatches = false;
+      if (finalCaseId) {
+        try {
+          const matches = await getSpeakerMatches(finalCaseId);
+          hasPendingMatches = (matches.pending || []).length > 0;
+        } catch {
+          // Non-fatal — the case dashboard can still be opened manually.
+        }
+      }
+      onUploadComplete(finalCaseId, hasPendingMatches);
     } catch (err) {
       setError(err.message || 'Upload failed');
       setUploading(false);
@@ -226,6 +237,12 @@ export default function UploadModal({ onClose, onUploadComplete }) {
               <span className="upload-modal__processing-pct">
                 {Math.round((processStatus.progress || 0) * 100)}%
               </span>
+              {processStatus.progress >= 1 && processStatus.captions_ready === false && (
+                <span className="upload-modal__captions-note">
+                  Captions still indexing in the background — some visual
+                  descriptions may be incomplete until this finishes.
+                </span>
+              )}
             </div>
           </div>
         )}

@@ -54,7 +54,9 @@ if CAPTION_BACKEND not in {"clip", "blip"}:
     CAPTION_BACKEND = "blip"
 
 # Groq
-GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+# Note: model catalogs change over time — if this starts 404ing, check
+# currently available models with client.models.list() and update here.
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
 ENABLE_LLM_POLISH = os.getenv("ENABLE_LLM_POLISH", "false").strip().lower() == "true"
 
 # Server

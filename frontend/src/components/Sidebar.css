@@ -194,7 +194,8 @@
 }
 
 .sidebar__video-delete {
-  display: none;
+  display: flex;
+  visibility: hidden;
   align-items: center;
   justify-content: center;
   width: 22px;
@@ -209,7 +210,7 @@
 }
 
 .sidebar__video-item:hover .sidebar__video-delete {
-  display: flex;
+  visibility: visible;
 }
 
 .sidebar__video-delete:hover {
@@ -323,4 +324,11 @@
   max-width: 100px;
   overflow: hidden;
   text-overflow: ellipsis;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.sidebar__case-badge:hover {
+  background: var(--accent-primary);
+  color: #000;
 }

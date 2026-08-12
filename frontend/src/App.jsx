@@ -4,6 +4,7 @@ import Sidebar from './components/Sidebar';
 import ChatWindow from './components/ChatWindow';
 import VideoPlayer from './components/VideoPlayer';
 import UploadModal from './components/UploadModal';
+import CasePanel from './components/CasePanel';
 
 function App() {
   const [selectedVideoId, setSelectedVideoId] = useState(null);
@@ -12,11 +13,17 @@ function App() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [activeClip, setActiveClip] = useState(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [casePanelId, setCasePanelId] = useState(null);
 
-  const handleUploadComplete = (caseId) => {
+  const handleUploadComplete = (caseId, hasPendingMatches) => {
     setShowUpload(false);
     setRefreshKey((k) => k + 1);
-    if (caseId) setSelectedCaseId(caseId);
+    if (caseId) {
+      setSelectedCaseId(caseId);
+      // Novelty 1, Step 5: surface the auto-match confirmation UI immediately
+      // instead of leaving it as an inert API a user would never find.
+      if (hasPendingMatches) setCasePanelId(caseId);
+    }
   };
 
   const handleClipClick = (clip) => {
@@ -40,6 +47,7 @@ function App() {
           collapsed={sidebarCollapsed}
           onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
           onDeleteVideo={() => setRefreshKey((k) => k + 1)}
+          onOpenCasePanel={(caseId) => setCasePanelId(caseId)}
         />
       </aside>
 
@@ -68,6 +76,11 @@ function App() {
           onClose={() => setShowUpload(false)}
           onUploadComplete={handleUploadComplete}
         />
+      )}
+
+      {/* Case dashboard: speaker match confirmation, testimony, contradictions */}
+      {casePanelId && (
+        <CasePanel caseId={casePanelId} onClose={() => setCasePanelId(null)} />
       )}
     </div>
   );

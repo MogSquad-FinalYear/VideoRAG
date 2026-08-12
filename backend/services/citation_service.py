@@ -44,8 +44,11 @@ def extract_citations_from_answer(answer: str) -> list[dict]:
     """
     citations = []
 
-    # Match [MM:SS] or [HH:MM:SS] patterns
-    pattern = r'\[(\d{1,2}):(\d{2})(?::(\d{2}))?\]'
+    # Match [MM:SS] / [HH:MM:SS], optionally followed by "– MM:SS" for a
+    # range (the answer-generation prompt explicitly asks the LLM to group
+    # consecutive timestamps into ranges, so this format is common — the
+    # range's end is ignored, we cite/verify against its start).
+    pattern = r'\[(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s*[-–]\s*\d{1,2}:\d{2}(?::\d{2})?)?\]'
     for match in re.finditer(pattern, answer):
         full_match = match.group(0)
         parts = [int(x) for x in match.groups() if x is not None]
@@ -88,7 +91,7 @@ def compute_clip_hash(video_id: str, timestamp: float,
 
     # Get all frames and their timestamps from the index
     try:
-        image_col, _, _ = indexing_service.get_collections()
+        image_col, _, _, _ = indexing_service.get_collections()
         results = image_col.get(
             where={"video_id": video_id},
             include=["metadatas"],
@@ -225,6 +228,24 @@ def verify_citation(claim_text: str, cited_timestamp: float,
                         evidence_parts.append(f"Caption [{ts:.0f}s]: {doc}")
     except Exception as e:
         logger.debug("Failed to get caption evidence: %s", e)
+
+    # Get OCR (on-screen text) near the timestamp
+    try:
+        ocr_col = indexing_service.get_collections()[3]  # ocr collection
+        count = ocr_col.count()
+        if count > 0:
+            results = ocr_col.get(
+                where={"video_id": video_id},
+                include=["metadatas", "documents"],
+            )
+            if results and results["documents"]:
+                for i, doc in enumerate(results["documents"]):
+                    meta = results["metadatas"][i] if results["metadatas"] else {}
+                    ts = meta.get("timestamp", 0)
+                    if abs(ts - cited_timestamp) <= 3.0:
+                        evidence_parts.append(f"On-screen text (OCR) [{ts:.0f}s]: {doc}")
+    except Exception as e:
+        logger.debug("Failed to get OCR evidence: %s", e)
 
     if not evidence_parts:
         return {"supported": False, "confidence": 0.0,

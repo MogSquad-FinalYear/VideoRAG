@@ -425,6 +425,16 @@ async def delete_video(video_id: str):
     except Exception as e:
         logger.warning(f"Error deleting testimony data for {video_id}: {e}")
 
+    # Delete speaker roles/mappings (Novelty 1) — otherwise a deleted
+    # video's local speakers keep showing up as pending voiceprint matches
+    # with no way to resolve them since the video no longer exists.
+    try:
+        from backend.services import speaker_service
+        speaker_service.delete_video_speakers(video_id)
+        deleted_items.append("speakers")
+    except Exception as e:
+        logger.warning(f"Error deleting speaker data for {video_id}: {e}")
+
     if not deleted_items:
         raise HTTPException(status_code=404, detail=f"Video {video_id} not found.")
 

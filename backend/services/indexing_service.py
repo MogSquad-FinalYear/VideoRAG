@@ -95,7 +95,7 @@ def get_chroma_client():
 def get_collections():
     """Return the collections, initializing if needed."""
     get_chroma_client()
-    return _image_col, _caption_col, _speech_col
+    return _image_col, _caption_col, _speech_col, _ocr_col
 
 
 def index_frames(video_id: str, frame_paths: list[str], embeddings: list[list[float]], timestamps: list[float] = None):
@@ -458,6 +458,29 @@ def get_index_stats() -> dict:
         "speech_index": _speech_col.count(),
         "ocr_index": _ocr_col.count(),
     }
+
+
+def is_captions_ready(video_id: str) -> bool:
+    """Bug #4: check whether caption indexing has finished for a video.
+
+    Returns True (never blocks) when video_id is unset or the video's
+    metadata can't be read, so unscoped/cross-video queries and unknown
+    videos are never gated on this flag — only a single freshly-uploaded
+    video with captions still generating in the background should be.
+    """
+    if not video_id:
+        return True
+    try:
+        import json
+        from backend.config import METADATA_DIR
+        meta_path = METADATA_DIR / f"{video_id}.json"
+        if not meta_path.exists():
+            return True
+        with open(meta_path) as f:
+            meta = json.load(f)
+        return bool(meta.get("captions_ready", False))
+    except Exception:
+        return True
 
 
 def delete_video_from_indexes(video_id: str):
