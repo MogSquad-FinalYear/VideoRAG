@@ -14,6 +14,7 @@ export default function Sidebar({
   collapsed,
   onToggleCollapse,
   onDeleteVideo,
+  onOpenCasePanel,
 }) {
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -115,7 +116,7 @@ export default function Sidebar({
       <div className="sidebar__section">
         <button
           className={`sidebar__all-btn ${!selectedVideoId ? 'sidebar__all-btn--active' : ''}`}
-          onClick={() => onSelectVideo(null)}
+          onClick={() => onSelectVideo(null, null)}
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <circle cx="11" cy="11" r="8" />
@@ -156,13 +157,13 @@ export default function Sidebar({
               <div
                 key={video.video_id}
                 className={`sidebar__video-item ${selectedVideoId === video.video_id ? 'sidebar__video-item--active' : ''}`}
-                onClick={() => onSelectVideo(video.video_id)}
+                onClick={() => onSelectVideo(video.video_id, video.case_id || null)}
                 role="button"
                 tabIndex={0}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();
-                    onSelectVideo(video.video_id);
+                    onSelectVideo(video.video_id, video.case_id || null);
                   }
                 }}
                 id={`video-${video.video_id}`}
@@ -185,6 +186,18 @@ export default function Sidebar({
                   <div className="sidebar__video-meta">
                     <span>{formatDuration(video.duration)}</span>
                     {video.resolution && <span>{video.resolution}</span>}
+                    {video.case_id && (
+                      <span
+                        className="sidebar__case-badge"
+                        title={`Open case: ${video.case_id}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenCasePanel?.(video.case_id);
+                        }}
+                      >
+                        📁 {video.case_id}
+                      </span>
+                    )}
                   </div>
                 </div>
                 <StatusBadge status={video.status} />

@@ -1,0 +1,238 @@
+{
+  "n_pairs": 21,
+  "accuracy": 1.0,
+  "per_class": {
+    "CONTRADICT": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 8
+    },
+    "ENTAIL": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 7
+    },
+    "UNRELATED": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 6
+    }
+  },
+  "contradict_false_positive_rate": 0.0,
+  "confusion_matrix_labels": [
+    "CONTRADICT",
+    "ENTAIL",
+    "UNRELATED"
+  ],
+  "confusion_matrix": [
+    [
+      8,
+      0,
+      0
+    ],
+    [
+      0,
+      7,
+      0
+    ],
+    [
+      0,
+      0,
+      6
+    ]
+  ],
+  "records": [
+    {
+      "statement_a": "The defendant was wearing a red jacket that night.",
+      "statement_b": "The defendant was not wearing a jacket at all that night.",
+      "ground_truth": "CONTRADICT",
+      "predicted": "CONTRADICT",
+      "confidence": 1.0,
+      "source": "hand-authored",
+      "correct": true
+    },
+    {
+      "statement_a": "I saw her leave the building before 9 PM.",
+      "statement_b": "She was still inside the building well after 9 PM.",
+      "ground_truth": "CONTRADICT",
+      "predicted": "CONTRADICT",
+      "confidence": 0.9,
+      "source": "hand-authored",
+      "correct": true
+    },
+    {
+      "statement_a": "The gun was found on the kitchen table.",
+      "statement_b": "There was no gun anywhere in the kitchen.",
+      "ground_truth": "CONTRADICT",
+      "predicted": "CONTRADICT",
+      "confidence": 1.0,
+      "source": "hand-authored",
+      "correct": true
+    },
+    {
+      "statement_a": "He told me he had never met the victim.",
+      "statement_b": "He admitted to me that he had known the victim for years.",
+      "ground_truth": "CONTRADICT",
+      "predicted": "CONTRADICT",
+      "confidence": 0.9,
+      "source": "hand-authored",
+      "correct": true
+    },
+    {
+      "statement_a": "The car was parked outside the entire evening.",
+      "statement_b": "The car was gone for at least two hours that evening.",
+      "ground_truth": "CONTRADICT",
+      "predicted": "CONTRADICT",
+      "confidence": 0.9,
+      "source": "hand-authored",
+      "correct": true
+    },
+    {
+      "statement_a": "I was alone in the office when it happened.",
+      "statement_b": "There were three other people in the office with me at the time.",
+      "ground_truth": "CONTRADICT",
+      "predicted": "CONTRADICT",
+      "confidence": 1.0,
+      "source": "hand-authored",
+      "correct": true
+    },
+    {
+      "statement_a": "The defendant was wearing a red jacket that night.",
+      "statement_b": "Yes, I remember his jacket was red.",
+      "ground_truth": "ENTAIL",
+      "predicted": "ENTAIL",
+      "confidence": 1.0,
+      "source": "hand-authored",
+      "correct": true
+    },
+    {
+      "statement_a": "I saw her leave the building before 9 PM.",
+      "statement_b": "She definitely left before nine, I'm certain of that.",
+      "ground_truth": "ENTAIL",
+      "predicted": "ENTAIL",
+      "confidence": 0.9,
+      "source": "hand-authored",
+      "correct": true
+    },
+    {
+      "statement_a": "The gun was found on the kitchen table.",
+      "statement_b": "It was sitting right there on the table in the kitchen.",
+      "ground_truth": "ENTAIL",
+      "predicted": "ENTAIL",
+      "confidence": 0.9,
+      "source": "hand-authored",
+      "correct": true
+    },
+    {
+      "statement_a": "He told me he had never met the victim.",
+      "statement_b": "He was clear that they were strangers to each other.",
+      "ground_truth": "ENTAIL",
+      "predicted": "ENTAIL",
+      "confidence": 0.9,
+      "source": "hand-authored",
+      "correct": true
+    },
+    {
+      "statement_a": "The car was parked outside the entire evening.",
+      "statement_b": "It didn't move from that spot all night.",
+      "ground_truth": "ENTAIL",
+      "predicted": "ENTAIL",
+      "confidence": 0.9,
+      "source": "hand-authored",
+      "correct": true
+    },
+    {
+      "statement_a": "I was alone in the office when it happened.",
+      "statement_b": "No one else was around at that moment.",
+      "ground_truth": "ENTAIL",
+      "predicted": "ENTAIL",
+      "confidence": 0.9,
+      "source": "hand-authored",
+      "correct": true
+    },
+    {
+      "statement_a": "The defendant was wearing a red jacket that night.",
+      "statement_b": "The weather report predicted rain for the weekend.",
+      "ground_truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "confidence": 1.0,
+      "source": "hand-authored",
+      "correct": true
+    },
+    {
+      "statement_a": "I saw her leave the building before 9 PM.",
+      "statement_b": "The courthouse cafeteria closes at noon on Fridays.",
+      "ground_truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "confidence": 1.0,
+      "source": "hand-authored",
+      "correct": true
+    },
+    {
+      "statement_a": "The gun was found on the kitchen table.",
+      "statement_b": "My commute to work usually takes forty minutes.",
+      "ground_truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "confidence": 1.0,
+      "source": "hand-authored",
+      "correct": true
+    },
+    {
+      "statement_a": "He told me he had never met the victim.",
+      "statement_b": "The judge asked for a ten minute recess.",
+      "ground_truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "confidence": 1.0,
+      "source": "hand-authored",
+      "correct": true
+    },
+    {
+      "statement_a": "The car was parked outside the entire evening.",
+      "statement_b": "The jury consists of twelve members.",
+      "ground_truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "confidence": 1.0,
+      "source": "hand-authored",
+      "correct": true
+    },
+    {
+      "statement_a": "I was alone in the office when it happened.",
+      "statement_b": "The defense attorney graduated from law school in 2010.",
+      "ground_truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "confidence": 1.0,
+      "source": "hand-authored",
+      "correct": true
+    },
+    {
+      "statement_a": "I saw the car go through the red light at the intersection.",
+      "statement_b": "I never saw the car near the intersection at all.",
+      "ground_truth": "CONTRADICT",
+      "predicted": "CONTRADICT",
+      "confidence": 1.0,
+      "source": "system end-to-end",
+      "correct": true
+    },
+    {
+      "statement_a": "I never saw the car near the intersection at all.",
+      "statement_b": "Yes, the car definitely ran the red light, I saw it clearly from where I was standing.",
+      "ground_truth": "CONTRADICT",
+      "predicted": "CONTRADICT",
+      "confidence": 0.99,
+      "source": "system end-to-end",
+      "correct": true
+    },
+    {
+      "statement_a": "I saw the car go through the red light at the intersection.",
+      "statement_b": "Yes, the car definitely ran the red light, I saw it clearly from where I was standing.",
+      "ground_truth": "ENTAIL",
+      "predicted": "ENTAIL",
+      "confidence": 1.0,
+      "source": "system end-to-end",
+      "correct": true
+    }
+  ]
+}

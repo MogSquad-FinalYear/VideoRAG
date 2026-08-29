@@ -10,7 +10,10 @@ from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 
 from backend.config import DATA_DIR, GROQ_API_KEY
-from backend.models import ChatRequest, ChatResponse, VideoClip, SearchResult
+from backend.models import (
+    ChatRequest, ChatResponse, VideoClip, SearchResult,
+    CitationVerification, ContradictionResult,
+)
 from backend.agent.agent import run_agent
 
 logger = logging.getLogger(__name__)
@@ -33,10 +36,42 @@ def _build_response(result: dict) -> ChatResponse:
             frame_path=s.get("frame_path", ""),
             source_index=s.get("source_index", ""),
         ))
+
+    # Phase 8: Citation verification results
+    citations = []
+    for c in result.get("citations", []):
+        citations.append(CitationVerification(
+            citation_id=c.get("citation_id", ""),
+            timestamp=c.get("timestamp", 0.0),
+            timestamp_text=c.get("timestamp_text", ""),
+            verification_score=c.get("verification_score", 0.0),
+            verification_result=c.get("verification_result", "unverified"),
+            explanation=c.get("explanation", ""),
+            clip_hash=c.get("clip_hash", ""),
+        ))
+
+    # Phase 7: Contradiction results
+    contradictions = []
+    for ct in result.get("contradictions", []):
+        contradictions.append(ContradictionResult(
+            contradiction_id=ct.get("contradiction_id", ""),
+            speaker_id=ct.get("speaker_id", ""),
+            statement_a=ct.get("statement_a", ""),
+            statement_b=ct.get("statement_b", ""),
+            confidence=ct.get("confidence", 0.0),
+            explanation=ct.get("explanation", ""),
+            video_a=ct.get("video_a"),
+            video_b=ct.get("video_b"),
+            timestamp_a=ct.get("timestamp_a"),
+            timestamp_b=ct.get("timestamp_b"),
+        ))
+
     return ChatResponse(
         answer=result["answer"],
         clips=clips,
         sources=sources,
+        citations=citations,
+        contradictions=contradictions,
     )
 
 
@@ -46,19 +81,13 @@ async def chat(request: ChatRequest):
     if not request.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
 
-    # Validate API key
-    if not GROQ_API_KEY:
-        raise HTTPException(
-            status_code=503,
-            detail="GROQ_API_KEY is not configured. Please add it to your .env file."
-        )
-
     logger.info(f"Chat query: '{request.query}' (video_id={request.video_id})")
 
     result = run_agent(
         query=request.query,
         video_id=request.video_id,
         image_path=request.image_path,
+        case_id=request.case_id,
     )
     return _build_response(result)
 

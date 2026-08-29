@@ -48,6 +48,8 @@ async def list_videos():
                 status="completed" if video_exists else "missing",
                 uploaded_at=meta.get("uploaded_at"),
                 thumbnail=thumbnail,
+                captions_ready=meta.get("captions_ready", False),
+                case_id=meta.get("case_id"),
             ))
         except Exception as e:
             logger.warning(f"Error reading metadata {meta_file}: {e}")

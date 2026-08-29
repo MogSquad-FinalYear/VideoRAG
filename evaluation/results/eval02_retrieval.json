@@ -1,0 +1,59 @@
+{
+  "speech (ASR)": {
+    "n_queries": 40,
+    "n_unique_docs": 629,
+    "n_total_docs": 697,
+    "recall_at_k_exact_frame": {
+      "1": 0.425,
+      "3": 0.525,
+      "5": 0.55,
+      "10": 0.575
+    },
+    "mrr_exact_frame": 0.472,
+    "recall_at_k_content_match": {
+      "1": 0.55,
+      "3": 0.575,
+      "5": 0.575,
+      "10": 0.6
+    },
+    "mrr_content_match": 0.566
+  },
+  "caption": {
+    "n_queries": 40,
+    "n_unique_docs": 29,
+    "n_total_docs": 81,
+    "recall_at_k_exact_frame": {
+      "1": 0.0,
+      "3": 0.0,
+      "5": 0.025,
+      "10": 0.15
+    },
+    "mrr_exact_frame": 0.021,
+    "recall_at_k_content_match": {
+      "1": 0.0,
+      "3": 0.0,
+      "5": 0.05,
+      "10": 0.175
+    },
+    "mrr_content_match": 0.03
+  },
+  "OCR": {
+    "n_queries": 40,
+    "n_unique_docs": 11,
+    "n_total_docs": 228,
+    "recall_at_k_exact_frame": {
+      "1": 0.0,
+      "3": 0.0,
+      "5": 0.05,
+      "10": 0.05
+    },
+    "mrr_exact_frame": 0.011,
+    "recall_at_k_content_match": {
+      "1": 0.0,
+      "3": 0.0,
+      "5": 0.0,
+      "10": 0.0
+    },
+    "mrr_content_match": 0.0
+  }
+}

@@ -39,12 +39,14 @@ videos_dir = DATA_DIR / "videos"
 app.mount("/video-files", StaticFiles(directory=str(videos_dir)), name="video-files")
 
 # Register routers
-from backend.routers import execute, status, chat, videos
+from backend.routers import execute, status, chat, videos, speakers, testimony
 
 app.include_router(execute.router, tags=["Execute"])
 app.include_router(status.router, tags=["Status"])
 app.include_router(chat.router, tags=["Chat"])
 app.include_router(videos.router, tags=["Videos"])
+app.include_router(speakers.router, tags=["Speakers"])
+app.include_router(testimony.router, tags=["Testimony"])
 
 
 @app.get("/")
@@ -56,6 +58,24 @@ async def root():
 async def health():
     from backend.services.indexing_service import get_index_stats
     stats = get_index_stats()
+    # Check detection DB
+    try:
+        from backend.config import DETECTION_DB_PATH
+        stats["detection_db"] = "available" if DETECTION_DB_PATH.parent.exists() else "missing"
+    except Exception:
+        stats["detection_db"] = "unavailable"
+    # Check testimony DB
+    try:
+        from backend.config import TESTIMONY_DB_PATH
+        stats["testimony_db"] = "available" if TESTIMONY_DB_PATH.parent.exists() else "missing"
+    except Exception:
+        stats["testimony_db"] = "unavailable"
+    # Check citation DB
+    try:
+        from backend.config import CITATION_DB_PATH
+        stats["citation_db"] = "available" if CITATION_DB_PATH.parent.exists() else "missing"
+    except Exception:
+        stats["citation_db"] = "unavailable"
     return {"status": "healthy", "indexes": stats}
 
 

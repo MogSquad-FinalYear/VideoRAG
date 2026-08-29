@@ -1,22 +1,43 @@
 """
-VideoRAG — Groq-Powered Agent
-Agentic loop: receives query → LLM decides tools → execute → LLM answers.
+VideoRAG — Groq-Powered Agent (Full Architecture)
+Implements the 3-stage pipeline from the architecture diagram:
+  ① Query Decouple — decompose user query into structured retrieval requests
+  ② Auxiliary Text Generation & Retrieval — multi-modal search (ASR, OCR, DET, CLIP, Caption)
+  ③ Merge & Rearrange + Final Answer — assemble evidence and generate answer
+
+Strategy A: Text-to-Video — returns top matches with detailed descriptions
+Strategy B: Image-to-Video — finds visually similar frames and describes them
 """
 import json
 import logging
-from groq import Groq
+from pathlib import Path
 
-from backend.config import GROQ_API_KEY, GROQ_MODEL, FRAMES_DIR, ENABLE_LLM_POLISH
-from backend.agent.tools import TOOL_DEFINITIONS
+from backend.config import GROQ_API_KEY, GROQ_MODEL, FRAMES_DIR
 from backend.services import indexing_service, embedding_service
 
 logger = logging.getLogger(__name__)
 
-# ── Singleton Groq client (Fix 7) ────────────────────────────────────────────
+
+def _expand_visual_query(query: str) -> str:
+    """Expand user query with retrieval-friendly visual synonyms for CLIP text search."""
+    q = query.lower()
+    expansions = []
+    if any(t in q for t in ["bike", "bicycle", "motorbike", "motorcycle"]):
+        expansions.append("bike bicycle motorcycle scooter two wheeler")
+    if any(t in q for t in ["car", "vehicle", "auto"]):
+        expansions.append("car vehicle sedan hatchback")
+    if any(t in q for t in ["hit", "hits", "hitting", "crash", "collision", "accident"]):
+        expansions.append("collision crash accident impact hitting")
+    if not expansions:
+        return query
+    return f"{query}. Related visual concepts: {'; '.join(expansions)}"
+
+
+# ── Singleton Groq client ────────────────────────────────────────────────────
 _groq_client = None
 
 
-def _get_groq_client() -> Groq:
+def _get_groq_client():
     """Return a singleton Groq client instance."""
     global _groq_client
     if _groq_client is None:
@@ -25,57 +46,228 @@ def _get_groq_client() -> Groq:
                 "GROQ_API_KEY is not set. Please add it to your .env file. "
                 "Get a free key at https://console.groq.com"
             )
+        from groq import Groq
         _groq_client = Groq(api_key=GROQ_API_KEY)
         logger.info("Groq client initialized.")
     return _groq_client
 
 
-# ── System Prompt (Fix 16) ───────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are **Kubrick**, a forensic video analysis AI assistant. You help investigators search and analyze evidence videos.
+# ── Frame path resolution ────────────────────────────────────────────────────
 
-You have access to a multimodal video retrieval system with 3 indexes:
-1. **Caption Index** — Short scene descriptions of each frame (can be generic/inaccurate)
-2. **Image Index** — CLIP visual embeddings of each frame (best for finding specific people, objects, appearances)
-3. **Speech Index** — Transcribed speech/dialogue from the video
+def _url_to_fs_path(frame_url: str) -> str | None:
+    """Convert a browser URL like /frames/vid123/frame_000007.jpg to filesystem path."""
+    if not frame_url:
+        return None
+    try:
+        # /frames/{video_id}/{frame_name} → FRAMES_DIR / video_id / frame_name
+        parts = frame_url.strip("/").split("/")
+        if len(parts) >= 3 and parts[0] == "frames":
+            video_id = parts[1]
+            frame_name = parts[2]
+            fs_path = FRAMES_DIR / video_id / frame_name
+            if fs_path.exists():
+                return str(fs_path)
+    except Exception:
+        pass
+    return None
 
-## Query Strategy — FOLLOW STRICTLY
-- For questions about **specific people, characters, or visual appearances**: Use `search_by_visual_similarity` as PRIMARY. The caption index has generic descriptions that often miss specific identities.
-- For questions about **general scenes or activities**: Use `search_by_caption`.
-- For questions about **spoken words or dialogue**: Use `search_transcripts`.
-- **ALWAYS call at least 2 different search tools** for any question about video content. Cross-reference results from visual similarity AND captions for the most accurate answer.
 
-## IMAGE-BASED SEARCH
-When the user uploads a reference image:
-- The system has ALREADY performed visual similarity search using the image's CLIP embedding.
-- The search results you receive include frames that visually resemble the uploaded image.
-- Your job is to **analyze the results**, identify who/what appears in the matching frames, and give a clear answer.
-- Describe what you see: who the person is (if identifiable), what they're doing, and when they appear.
-- Report ALL occurrences — don't stop at the first match.
+def _enrich_with_descriptions(sources: list[dict], max_describe: int = 2) -> list[dict]:
+    """Enrich the top N search results with detailed descriptions.
 
-## CRITICAL RULES
-1. You MUST call search tools before answering. NEVER answer from assumptions.
-2. ALWAYS use `search_by_visual_similarity` when the question is about a person, character, or specific object.
-3. For every search, set n=10 or higher to find ALL occurrences.
-4. **Only report frames where you are confident about the match.** If the caption or visual match seems generic or unrelated, EXCLUDE it. Quality over quantity.
-5. Report ALL matching timestamps as [MM:SS] format.
-6. Each frame is sampled at 1fps, so frame_number N = timestamp N seconds.
-7. When results from different tools disagree, prefer the visual similarity results for appearance questions.
-8. Group consecutive matching timestamps into ranges (e.g., [00:11] to [00:15]) instead of listing each second."""
+    Strategy (BLIP-first, matching the indexing-time CAPTION_BACKEND default):
+    1. If source already has a meaningful 'content' (from caption index), use it.
+    2. Otherwise, look up stored caption from the caption index for that frame.
+    3. Try BLIP on-demand for a real generated caption.
+    4. Fall back to CLIP-label description only if BLIP is unavailable/fails
+       (e.g. memory-constrained environment).
+    5. Fallback: generate from metadata.
+    """
+    described = 0
+    for src in sources:
+        if described >= max_describe:
+            break
 
+        video_id = src.get("video_id", "")
+        frame_number = src.get("frame_number")
+        frame_path = src.get("frame_path", "")
+        existing_content = src.get("content", "")
+
+        # ── Step 1: If this came from caption index, it already has a caption ──
+        is_generic = (
+            not existing_content
+            or "Visual similarity match" in existing_content
+            or "Visual match for" in existing_content
+        )
+
+        if not is_generic and existing_content:
+            src["description"] = existing_content
+            described += 1
+            continue
+
+        # ── Step 2: Look up stored caption from caption index (fast) ──────────
+        if video_id and frame_number is not None:
+            stored_caption = indexing_service.get_caption_for_frame(video_id, frame_number)
+            if stored_caption:
+                src["description"] = stored_caption
+                src["content"] = stored_caption
+                described += 1
+                continue
+
+        # ── Step 3: Try BLIP on-demand (real generated caption, plan default) ──
+        fs_path = _url_to_fs_path(frame_path)
+        if fs_path:
+            try:
+                from backend.services.captioning_service import describe_frame_detailed
+                detailed = describe_frame_detailed(fs_path)
+                if detailed:
+                    src["description"] = detailed
+                    src["content"] = detailed
+                    described += 1
+                    continue
+            except (MemoryError, OSError) as e:
+                logger.warning(f"BLIP skipped (memory), falling back to CLIP: {e}")
+            except Exception as e:
+                logger.warning(f"BLIP description failed for {fs_path}, falling back to CLIP: {e}")
+
+        # ── Step 4: CLIP-based label description (fallback only) ──────────────
+        if fs_path:
+            try:
+                from backend.services.captioning_service import describe_frame_clip
+                clip_desc = describe_frame_clip(fs_path)
+                if clip_desc and len(clip_desc) > 20:
+                    src["description"] = clip_desc
+                    src["content"] = clip_desc
+                    described += 1
+                    continue
+            except Exception as e:
+                logger.warning(f"CLIP description failed for {fs_path}: {e}")
+
+        # ── Step 5: Fallback — generate from metadata ─────────────────────────
+        ts = src.get("timestamp")
+        if ts is not None:
+            minutes = int(ts) // 60
+            seconds = int(ts) % 60
+            src["description"] = f"Frame captured at [{minutes:02d}:{seconds:02d}] in video {video_id}. Visual content could not be described automatically."
+        elif frame_number is not None:
+            src["description"] = f"Frame #{frame_number} in video {video_id}. Visual content could not be described automatically."
+        else:
+            src["description"] = f"Matched frame from video {video_id}."
+        described += 1
+
+    return sources
+
+
+# ── Phase 6: Query Decouple ──────────────────────────────────────────────────
+
+DECOUPLE_PROMPT = """You are a query decomposition engine for a courtroom video analysis system.
+Given a user's natural language question about a video, decompose it into a structured JSON retrieval request.
+
+Output ONLY valid JSON with these fields:
+{
+  "asr_query": "text to search in speech transcripts, or null if speech is not relevant",
+  "visual_query": "text description for visual/CLIP search, or null if not needed",
+  "caption_query": "text for caption search, or null if not needed",
+  "ocr_query": "text to search in on-screen text, or null if not needed",
+  "det_classes": ["list", "of", "object", "classes", "to", "detect"],
+  "need_relations": false,
+  "check_contradictions": false,
+  "answer_type": "one of: count, location, description, timestamp, relation, contradiction, general"
+}
+
+Rules:
+- For counting questions ("how many X"), set answer_type="count" and det_classes=["X"]
+- For location questions ("where is X"), set answer_type="location" and det_classes=["X"]
+- For relation questions ("what is next to X"), set answer_type="relation" and need_relations=true
+- For speech/dialog questions, set asr_query and answer_type="description"
+- For visual search ("show me X"), set visual_query and caption_query
+- For text/reading questions, set ocr_query
+- For consistency/contradiction questions ("did the witness contradict", "testimony consistency", "changed their story"), set check_contradictions=true and answer_type="contradiction"
+- Always include visual_query and caption_query for general questions
+- Always include asr_query for general or description or contradiction questions — speech transcripts are the richest source of courtroom evidence
+- Use COCO class names for det_classes when possible (person, car, dog, cat, book, chair, etc.)
+"""
+
+
+def _decouple_query(query: str) -> dict:
+    """Phase 6: Decompose user query into structured retrieval request using LLM."""
+    default = {
+        "asr_query": None,
+        "visual_query": query,
+        "caption_query": query,
+        "ocr_query": None,
+        "det_classes": [],
+        "need_relations": False,
+        "check_contradictions": False,
+        "answer_type": "general",
+    }
+
+    if not GROQ_API_KEY:
+        return default
+
+    try:
+        client = _get_groq_client()
+        result = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": DECOUPLE_PROMPT},
+                {"role": "user", "content": f"User query: \"{query}\""},
+            ],
+            temperature=0.0,
+            max_tokens=300,
+        )
+        text = result.choices[0].message.content.strip()
+
+        # Extract JSON from response (handle markdown code blocks)
+        if "```" in text:
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+            text = text.strip()
+
+        parsed = json.loads(text)
+        # Validate and merge with defaults
+        for key in default:
+            if key not in parsed:
+                parsed[key] = default[key]
+        logger.info(f"Query decoupled: answer_type={parsed['answer_type']}, det_classes={parsed['det_classes']}")
+        return parsed
+    except Exception as e:
+        logger.warning(f"Query decouple failed, using defaults: {e}")
+        return default
+
+
+# ── Tool Execution ───────────────────────────────────────────────────────────
 
 def _execute_tool(tool_name: str, args: dict) -> str:
     """Execute a tool call and return the result as a string."""
     try:
         if tool_name == "search_by_caption":
-            results = indexing_service.search_captions(
+            semantic_hits = indexing_service.search_captions(
                 query_text=args["query"],
                 n=args.get("n", 10),
                 video_id=args.get("video_id"),
             )
-            return json.dumps(results, indent=2)
+            keyword_hits = indexing_service.search_captions_by_keyword(
+                keyword=args["query"],
+                n=args.get("n", 10),
+                video_id=args.get("video_id"),
+            )
+            merged = semantic_hits + keyword_hits
+            merged.sort(key=lambda x: x.get("score", 0), reverse=True)
+            dedup = []
+            seen = set()
+            for hit in merged:
+                key = (hit.get("video_id"), hit.get("frame_number"), hit.get("timestamp"), hit.get("source_index"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                dedup.append(hit)
+            return json.dumps(dedup[:args.get("n", 10)], indent=2)
 
         elif tool_name == "search_by_visual_similarity":
-            text_embedding = embedding_service.embed_text(args["query"])
+            expanded_query = _expand_visual_query(args["query"])
+            text_embedding = embedding_service.embed_text(expanded_query)
             results = indexing_service.search_images(
                 query_embedding=text_embedding,
                 n=args.get("n", 10),
@@ -99,36 +291,104 @@ def _execute_tool(tool_name: str, args: dict) -> str:
                 query_embedding=image_embedding,
                 n=args.get("n", 10),
                 video_id=args.get("video_id"),
+                min_score=args.get("min_score", 0.35),
             )
             for r in results:
-                r["content"] = f"Visual match for uploaded reference image."
+                r["content"] = f"Visual match for uploaded reference image (similarity: {r.get('score', 0):.1%})."
             return json.dumps(results, indent=2)
 
         elif tool_name == "get_video_clip_info":
             video_id = args["video_id"]
             start_time = args["start_time"]
             end_time = args["end_time"]
-            frames_dir = FRAMES_DIR / video_id
-            if not frames_dir.exists():
-                return json.dumps({"error": f"No frames found for video {video_id}"})
 
-            frame_files = sorted(frames_dir.glob("frame_*.jpg"))
-            clip_frames = []
-            for f in frame_files:
-                # Extract frame number from filename
-                num = int(f.stem.split("_")[1])
-                timestamp = num  # 1 FPS assumed
-                if start_time <= timestamp <= end_time:
-                    clip_frames.append({
-                        "frame_path": f"/frames/{video_id}/{f.name}",
-                        "timestamp": timestamp,
-                    })
+            # Bug #5 fix: use real timestamps from ChromaDB metadata
+            try:
+                image_col, _, _, _ = indexing_service.get_collections()
+                results = image_col.get(
+                    where={"video_id": video_id},
+                    include=["metadatas"],
+                )
+                clip_frames = []
+                if results and results["metadatas"]:
+                    for meta in results["metadatas"]:
+                        ts = meta.get("timestamp", 0)
+                        if start_time <= ts <= end_time:
+                            clip_frames.append({
+                                "frame_path": meta.get("frame_path", ""),
+                                "timestamp": ts,
+                                "frame_number": meta.get("frame_number"),
+                            })
+                clip_frames.sort(key=lambda x: x["timestamp"])
+            except Exception as e:
+                logger.warning(f"Failed to get clip info from index: {e}")
+                frames_dir = FRAMES_DIR / video_id
+                clip_frames = []
+                if frames_dir.exists():
+                    for f in sorted(frames_dir.glob("frame_*.jpg")):
+                        num = int(f.stem.split("_")[1])
+                        clip_frames.append({
+                            "frame_path": f"/frames/{video_id}/{f.name}",
+                            "timestamp": num,
+                            "frame_number": num,
+                        })
+                    clip_frames = [cf for cf in clip_frames if start_time <= cf["timestamp"] <= end_time]
+
             return json.dumps({
                 "video_id": video_id,
                 "start_time": start_time,
                 "end_time": end_time,
                 "frames": clip_frames,
             }, indent=2)
+
+        # ── Phase 3: OCR search ──────────────────────────────────────────────
+        elif tool_name == "search_ocr":
+            results = indexing_service.search_ocr(
+                query_text=args["query"],
+                n=args.get("n", 10),
+                video_id=args.get("video_id"),
+            )
+            return json.dumps(results, indent=2)
+
+        # ── Phase 4: Object counting/location ────────────────────────────────
+        elif tool_name == "count_objects":
+            from backend.services import detection_db
+            result = detection_db.count_objects(
+                video_id=args["video_id"],
+                class_name=args.get("class_name"),
+                start_time=args.get("start_time"),
+                end_time=args.get("end_time"),
+            )
+            return json.dumps(result, indent=2)
+
+        elif tool_name == "locate_object":
+            from backend.services import detection_db
+            results = detection_db.locate_objects(
+                video_id=args["video_id"],
+                class_name=args["class_name"],
+                start_time=args.get("start_time"),
+                end_time=args.get("end_time"),
+            )
+            return json.dumps(results, indent=2)
+
+        # ── Phase 5: Scene graph relations ───────────────────────────────────
+        elif tool_name == "get_relations":
+            from backend.services import detection_db
+            results = detection_db.get_relations(
+                video_id=args["video_id"],
+                start_time=args.get("start_time"),
+                end_time=args.get("end_time"),
+            )
+            return json.dumps(results, indent=2)
+
+        # ── Phase 7: Contradiction checking ────────────────────────────────
+        elif tool_name == "check_contradictions":
+            from backend.services import testimony_db
+            contradictions = testimony_db.get_contradictions(
+                case_id=args["case_id"],
+                speaker_id=args.get("speaker_id"),
+            )
+            return json.dumps(contradictions, indent=2)
 
         else:
             return json.dumps({"error": f"Unknown tool: {tool_name}"})
@@ -138,115 +398,41 @@ def _execute_tool(tool_name: str, args: dict) -> str:
         return json.dumps({"error": str(e)})
 
 
-def _build_local_answer(query: str, video_id: str = None, image_path: str = None) -> dict:
-    """Fallback retrieval path when the LLM is unavailable."""
-    query_lower = query.lower()
-    sources = []
+# ── Phase 6: Structured Source Collection (Query Decouple → Route) ───────────
 
-    if image_path:
-        sources.extend(json.loads(_execute_tool("search_by_image", {
-            "image_path": image_path,
-            "video_id": video_id,
-            "n": 10,
-        })))
+def _collect_sources_decoupled(query: str, decouple: dict, video_id: str = None,
+                                image_path: str = None,
+                                case_id: str = None) -> tuple[list[dict], list[str], dict]:
+    """
+    Phase 6: Collect sources using structured decouple output to decide which
+    tools/collections to query instead of flat heuristic routing.
 
-    if any(keyword in query_lower for keyword in ["said", "say", "spoken", "tell", "audio", "voice", "witness", "mention", "mentioned"]):
-        sources.extend(json.loads(_execute_tool("search_transcripts", {
-            "query": query,
-            "video_id": video_id,
-            "n": 10,
-        })))
-    elif any(keyword in query_lower for keyword in ["person", "man", "woman", "car", "vehicle", "object", "bag", "weapon", "blue", "red", "green", "shirt", "jacket", "face"]):
-        sources.extend(json.loads(_execute_tool("search_by_visual_similarity", {
-            "query": query,
-            "video_id": video_id,
-            "n": 10,
-        })))
-        sources.extend(json.loads(_execute_tool("search_by_caption", {
-            "query": query,
-            "video_id": video_id,
-            "n": 10,
-        })))
-    else:
-        sources.extend(json.loads(_execute_tool("search_by_caption", {
-            "query": query,
-            "video_id": video_id,
-            "n": 10,
-        })))
-        sources.extend(json.loads(_execute_tool("search_by_visual_similarity", {
-            "query": query,
-            "video_id": video_id,
-            "n": 10,
-        })))
-
-    deduped = []
-    seen = set()
-    for src in sources:
-        key = (
-            src.get("video_id"),
-            src.get("frame_number"),
-            src.get("timestamp"),
-            src.get("start_time"),
-            src.get("end_time"),
-            src.get("content"),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(src)
-
-    top_hits = deduped[:5]
-    if not top_hits:
-        return {
-            "answer": "I could not find matching evidence in the current indexes.",
-            "clips": [],
-            "sources": [],
-        }
-
-    summary_lines = ["I found the following relevant evidence:"]
-    for hit in top_hits:
-        timestamp = hit.get("timestamp")
-        start_time = hit.get("start_time")
-        end_time = hit.get("end_time")
-        if timestamp is not None:
-            summary_lines.append(f"- {hit.get('video_id')} at {timestamp:.0f}s")
-        elif start_time is not None and end_time is not None:
-            summary_lines.append(f"- {hit.get('video_id')} from {start_time:.0f}s to {end_time:.0f}s")
-        else:
-            summary_lines.append(f"- {hit.get('video_id')}")
-
-    return {
-        "answer": "\n".join(summary_lines),
-        "clips": _build_clips(deduped),
-        "sources": deduped[:20],
-    }
-
-
-def _is_speech_query(query: str) -> bool:
-    q = query.lower()
-    speech_terms = [
-        "said", "say", "spoken", "speech", "audio", "voice", "transcript",
-        "when did", "quote", "mention", "witness", "told", "heard",
-    ]
-    return any(term in q for term in speech_terms)
-
-
-def _collect_sources(query: str, video_id: str = None, image_path: str = None) -> tuple[list[dict], list[str]]:
-    """Deterministic multimodal routing to keep retrieval reliable under all conditions."""
+    Returns:
+        (sources, strategies, structured_evidence)
+    """
     sources: list[dict] = []
     used_strategies: list[str] = []
+    structured_evidence = {
+        "asr_results": [],
+        "ocr_results": [],
+        "detection_results": {},
+        "location_results": [],
+        "relation_results": [],
+        "contradiction_results": [],
+    }
 
+    # ── Image-to-Video search (Strategy B) ───────────────────────────────
     if image_path:
         used_strategies.append("image-to-video")
         image_hits = json.loads(_execute_tool("search_by_image", {
             "image_path": image_path,
             "video_id": video_id,
-            "n": 15,  # Boost for image search — we want all occurrences
+            "n": 10,
+            "min_score": 0.35,
         }))
         if isinstance(image_hits, list):
             sources.extend(image_hits)
 
-        # Also run text-based visual similarity using the query for cross-referencing
         if query and query.strip().lower() not in ("find frames similar to this image", ""):
             used_strategies.append("text-to-video (cross-ref)")
             text_visual_hits = json.loads(_execute_tool("search_by_visual_similarity", {
@@ -256,156 +442,604 @@ def _collect_sources(query: str, video_id: str = None, image_path: str = None) -
             }))
             if isinstance(text_visual_hits, list):
                 sources.extend(text_visual_hits)
+        return sources, used_strategies, structured_evidence
 
-    elif _is_speech_query(query):
-        used_strategies.append("audio/transcript")
+    # ── ASR search ───────────────────────────────────────────────────────
+    if decouple.get("asr_query"):
+        used_strategies.append("speech/transcript")
         speech_hits = json.loads(_execute_tool("search_transcripts", {
-            "query": query,
+            "query": decouple["asr_query"],
             "video_id": video_id,
             "n": 12,
         }))
         if isinstance(speech_hits, list):
             sources.extend(speech_hits)
+            structured_evidence["asr_results"] = speech_hits
 
-        caption_hits = json.loads(_execute_tool("search_by_caption", {
-            "query": query,
-            "video_id": video_id,
-            "n": 8,
-        }))
-        if isinstance(caption_hits, list):
-            sources.extend(caption_hits)
-    else:
-        used_strategies.append("text-to-video")
-        caption_hits = json.loads(_execute_tool("search_by_caption", {
-            "query": query,
-            "video_id": video_id,
-            "n": 12,
-        }))
-        if isinstance(caption_hits, list):
-            sources.extend(caption_hits)
-
+    # ── Visual / Caption search ──────────────────────────────────────────
+    if decouple.get("visual_query"):
+        used_strategies.append("visual-similarity")
         visual_hits = json.loads(_execute_tool("search_by_visual_similarity", {
-            "query": query,
+            "query": decouple["visual_query"],
             "video_id": video_id,
             "n": 12,
         }))
         if isinstance(visual_hits, list):
             sources.extend(visual_hits)
 
-    deduped: list[dict] = []
-    seen = set()
+    if decouple.get("caption_query"):
+        if video_id and not indexing_service.is_captions_ready(video_id):
+            # Bug #4: caption indexing still running in the background for
+            # this video — skip caption search rather than silently querying
+            # a partially-populated collection.
+            structured_evidence["captions_pending"] = True
+        else:
+            used_strategies.append("caption-search")
+            caption_hits = json.loads(_execute_tool("search_by_caption", {
+                "query": decouple["caption_query"],
+                "video_id": video_id,
+                "n": 12,
+            }))
+            if isinstance(caption_hits, list):
+                sources.extend(caption_hits)
+
+    # ── OCR search ───────────────────────────────────────────────────────
+    if decouple.get("ocr_query"):
+        used_strategies.append("ocr-text")
+        ocr_hits = json.loads(_execute_tool("search_ocr", {
+            "query": decouple["ocr_query"],
+            "video_id": video_id,
+            "n": 10,
+        }))
+        if isinstance(ocr_hits, list):
+            sources.extend(ocr_hits)
+            structured_evidence["ocr_results"] = ocr_hits
+
+    # ── Object detection (counting / location) ───────────────────────────
+    if decouple.get("det_classes") and video_id:
+        for cls in decouple["det_classes"]:
+            if decouple.get("answer_type") == "count":
+                used_strategies.append(f"object-count({cls})")
+                count_result = json.loads(_execute_tool("count_objects", {
+                    "class_name": cls,
+                    "video_id": video_id,
+                }))
+                structured_evidence["detection_results"][cls] = count_result
+
+            if decouple.get("answer_type") in ("location", "relation"):
+                used_strategies.append(f"object-locate({cls})")
+                loc_results = json.loads(_execute_tool("locate_object", {
+                    "class_name": cls,
+                    "video_id": video_id,
+                }))
+                if isinstance(loc_results, list):
+                    structured_evidence["location_results"].extend(loc_results)
+
+    # ── Scene graph relations ────────────────────────────────────────────
+    if decouple.get("need_relations") and video_id:
+        used_strategies.append("scene-graph")
+        relations = json.loads(_execute_tool("get_relations", {
+            "video_id": video_id,
+        }))
+        if isinstance(relations, list):
+            structured_evidence["relation_results"] = relations
+
+    # ── Contradiction checking (Phase 7) ───────────────────────────────
+    if decouple.get("check_contradictions") and case_id:
+        used_strategies.append("contradiction-check")
+        contradiction_results = json.loads(_execute_tool("check_contradictions", {
+            "case_id": case_id,
+        }))
+        if isinstance(contradiction_results, list):
+            structured_evidence["contradiction_results"] = contradiction_results
+
+    # Deduplicate sources: keep best score per unique (video_id, frame_number/timestamp)
+    best_by_key = {}
     for src in sources:
-        key = (
-            src.get("video_id"),
-            src.get("frame_number"),
-            src.get("timestamp"),
-            src.get("start_time"),
-            src.get("end_time"),
-            src.get("content"),
-            src.get("source_index"),
+        key = (src.get("video_id"), src.get("frame_number"), src.get("timestamp"),
+               src.get("start_time"), src.get("end_time"))
+        existing = best_by_key.get(key)
+        if existing is None or src.get("score", 0) > existing.get("score", 0):
+            best_by_key[key] = src
+
+    deduped = list(best_by_key.values())
+
+    # Boost image index results for image-to-video queries
+    source_boost = {"image": 0.12, "caption": 0.06, "speech": 0.03, "ocr": 0.04}
+    deduped.sort(
+        key=lambda item: item.get("score", 0) + (source_boost.get(item.get("source_index", ""), 0.0) if image_path else 0.0),
+        reverse=True,
+    )
+    return deduped, used_strategies, structured_evidence
+
+
+# ── Phase 7: Merge & Rearrange ───────────────────────────────────────────────
+
+def _merge_and_rearrange(query: str, sources: list[dict], structured_evidence: dict,
+                          decouple: dict, strategies: list[str],
+                          video_id: str = None, is_image_search: bool = False) -> str:
+    """
+    Phase 7: Merge all structured outputs into a single context block,
+    then send to LLM for the final answer.
+
+    This is the '③ Integration and Generation' box in the architecture diagram.
+    """
+    # Build structured context from all sub-systems
+    context_parts = []
+
+    if structured_evidence.get("captions_pending"):
+        context_parts.append(
+            "## Note\nCaption indexing for this video is still in progress; "
+            "visual/caption descriptions below may be incomplete."
         )
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(src)
 
-    deduped.sort(key=lambda item: item.get("score", 0), reverse=True)
-    return deduped, used_strategies
+    # Frame-level evidence (captions, visual descriptions)
+    if sources:
+        frame_evidence = []
+        for i, src in enumerate(sources[:8]):  # Limit to top 8
+            ts = src.get("timestamp")
+            ts_str = f"[{int(ts)//60:02d}:{int(ts)%60:02d}]" if ts is not None else "[?]"
+            desc = src.get("description", src.get("content", ""))
+            source_type = src.get("source_index", "unknown")
+            score = src.get("score", 0)
+            frame_evidence.append(f"  - {ts_str} ({source_type}, score={score:.2f}): {desc}")
+        if frame_evidence:
+            context_parts.append("## Frame Evidence\n" + "\n".join(frame_evidence))
+
+    # ASR evidence
+    asr = structured_evidence.get("asr_results", [])
+    if asr:
+        asr_lines = []
+        for seg in asr[:10]:  # Show more speech segments for richer context
+            st = seg.get("start_time", 0)
+            et = seg.get("end_time", 0)
+            text = seg.get("content", "")
+            speaker = seg.get("speaker_id", "")
+            role = seg.get("role", "")
+            vid = seg.get("video_id", "")
+
+            speaker_label = ""
+            if speaker and role and role != "unknown":
+                speaker_label = f" [{role.upper()} / {speaker}]"
+            elif speaker:
+                speaker_label = f" [{speaker}]"
+
+            asr_lines.append(
+                f"  - [{int(st)//60:02d}:{int(st)%60:02d} – {int(et)//60:02d}:{int(et)%60:02d}]"
+                f"{speaker_label} (video {vid}): \"{text}\""
+            )
+        context_parts.append("## Speech/Transcript Evidence\n" + "\n".join(asr_lines))
+
+    # OCR evidence
+    ocr = structured_evidence.get("ocr_results", [])
+    if ocr:
+        ocr_lines = []
+        for item in ocr[:5]:
+            ts = item.get("timestamp")
+            ts_str = f"[{int(ts)//60:02d}:{int(ts)%60:02d}]" if ts is not None else "[?]"
+            text = item.get("content", "")
+            ocr_lines.append(f"  - {ts_str}: {text}")
+        context_parts.append("## On-Screen Text (OCR) Evidence\n" + "\n".join(ocr_lines))
+
+    # Detection counts
+    det = structured_evidence.get("detection_results", {})
+    if det:
+        det_lines = []
+        for cls, result in det.items():
+            if isinstance(result, dict):
+                counts = result.get("counts", {})
+                for obj_cls, cnt in counts.items():
+                    det_lines.append(f"  - {obj_cls}: max {cnt} instances in a single frame")
+        if det_lines:
+            context_parts.append("## Object Detection Counts\n" + "\n".join(det_lines))
+
+    # Object locations
+    locs = structured_evidence.get("location_results", [])
+    if locs:
+        loc_lines = []
+        for loc in locs[:5]:
+            ts = loc.get("timestamp", 0)
+            ts_str = f"[{int(ts)//60:02d}:{int(ts)%60:02d}]"
+            cls = loc.get("class_name", "")
+            bbox = loc.get("bbox", [])
+            loc_lines.append(f"  - {ts_str}: {cls} at bbox {bbox} (confidence: {loc.get('confidence', 0):.2f})")
+        context_parts.append("## Object Locations\n" + "\n".join(loc_lines))
+
+    # Scene graph relations
+    rels = structured_evidence.get("relation_results", [])
+    if rels:
+        rel_lines = []
+        for rel in rels[:10]:
+            ts = rel.get("timestamp", 0)
+            ts_str = f"[{int(ts)//60:02d}:{int(ts)%60:02d}]"
+            triple = rel.get("triple", "")
+            rel_lines.append(f"  - {ts_str}: {triple}")
+        context_parts.append("## Object Relations (Scene Graph)\n" + "\n".join(rel_lines))
+
+    # Contradiction evidence (Phase 7)
+    contradictions = structured_evidence.get("contradiction_results", [])
+    if contradictions:
+        contra_lines = []
+        for c in contradictions[:5]:
+            speaker = c.get("speaker_id", "unknown")
+            conf = c.get("confidence", 0)
+            stmt_a = c.get("stmt_a_text", "")
+            stmt_b = c.get("stmt_b_text", "")
+            ts_a = c.get("stmt_a_timestamp", 0)
+            ts_b = c.get("stmt_b_timestamp", 0)
+            vid_a = c.get("stmt_a_video_id", "")
+            vid_b = c.get("stmt_b_video_id", "")
+            contra_lines.append(
+                f"  - **{speaker}** (confidence: {conf:.0%}):\n"
+                f"    Session 1 [{int(ts_a)//60:02d}:{int(ts_a)%60:02d}] (video {vid_a}): \"{stmt_a}\"\n"
+                f"    Session 2 [{int(ts_b)//60:02d}:{int(ts_b)%60:02d}] (video {vid_b}): \"{stmt_b}\"\n"
+                f"    Explanation: {c.get('explanation', 'N/A')}"
+            )
+        context_parts.append("## Testimony Contradictions\n" + "\n".join(contra_lines))
+
+    merged_context = "\n\n".join(context_parts) if context_parts else "No evidence found."
+
+    # Build the final LLM prompt
+    answer_type = decouple.get("answer_type", "general")
+
+    system_prompt = """You are **Kubrick**, a forensic video analysis AI assistant for courtroom proceedings.
+
+You analyze multimodal evidence from a video retrieval system. You receive structured evidence from:
+1. **Caption/Visual Index** — AI-generated scene descriptions and CLIP similarity matches
+2. **Speech/ASR Index** — Transcribed speech and dialogue with speaker/role tags
+3. **OCR Index** — On-screen text extracted from frames
+4. **Object Detection** — YOLO-detected objects with counts and locations
+5. **Scene Graph** — Spatial relationships between detected objects
+6. **Testimony Memory** — Cross-session contradiction detection results
+
+## CRITICAL RULES
+1. Base your answer ONLY on the provided evidence — do NOT fabricate details.
+2. Report timestamps in [MM:SS] format.
+3. Group consecutive timestamps into ranges.
+4. Be specific about what the evidence shows.
+5. State confidence level when relevant.
+6. For counting questions, use the detection count data.
+7. For location questions, describe spatial positions from detection data.
+8. For relation questions, reference the scene graph triples.
+9. When speaker/role information is available, attribute quotes to the speaker (e.g., "The witness stated...").
+10. For contradiction questions, present both conflicting statements with their timestamps and sessions."""
+
+    user_prompt = f"""User query: "{query}"
+Answer type: {answer_type}
+Search strategies used: {', '.join(strategies)}
+
+{merged_context}
+
+Based on the above evidence, provide a clear, professional answer to the user's query."""
+
+    if not GROQ_API_KEY or not context_parts:
+        logger.warning("Skipping LLM synthesis: GROQ_API_KEY=%s, context_parts=%d",
+                       bool(GROQ_API_KEY), len(context_parts))
+        return _render_answer_fallback(query, sources, strategies, video_id, is_image_search,
+                                        structured_evidence)
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    # Try primary model, then fallback model
+    models_to_try = [GROQ_MODEL, "llama-3.3-70b-versatile"]
+    for model_name in models_to_try:
+        try:
+            client = _get_groq_client()
+            logger.info("Generating final answer with model: %s (prompt length: %d chars)",
+                        model_name, len(user_prompt))
+            result = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=0.1,
+                max_tokens=1500,
+            )
+            text = result.choices[0].message.content
+            if text and text.strip():
+                logger.info("LLM answer generated successfully with %s (%d chars)",
+                            model_name, len(text))
+                return text
+            logger.warning("LLM returned empty response with model %s", model_name)
+        except Exception as e:
+            logger.error("LLM answer generation failed with model %s: %s", model_name, e,
+                         exc_info=True)
+
+    logger.warning("All LLM models failed, using fallback answer rendering.")
+    return _render_answer_fallback(query, sources, strategies, video_id, is_image_search,
+                                    structured_evidence)
 
 
-def _render_answer(query: str, sources: list[dict], strategies: list[str], video_id: str = None) -> str:
-    if not sources:
+# ── Fallback answer rendering ────────────────────────────────────────────────
+
+def _format_timestamp(hit: dict) -> str:
+    """Format a hit's timestamp into [MM:SS] string."""
+    ts = hit.get("timestamp")
+    if ts is not None:
+        minutes = int(ts) // 60
+        seconds = int(ts) % 60
+        return f"[{minutes:02d}:{seconds:02d}]"
+    st = hit.get("start_time")
+    et = hit.get("end_time")
+    if st is not None and et is not None:
+        return f"[{int(st)//60:02d}:{int(st)%60:02d} – {int(et)//60:02d}:{int(et)%60:02d}]"
+    return "[unknown]"
+
+
+def _render_answer_fallback(query: str, sources: list[dict], strategies: list[str],
+                             video_id: str = None, is_image_search: bool = False,
+                             structured_evidence: dict = None) -> str:
+    """Build a readable text answer when LLM is unavailable.
+
+    Prioritizes synthesized content from speech transcripts over raw frame matches.
+    """
+    if not sources and not structured_evidence:
         scope = f" in video {video_id}" if video_id else ""
-        return f"I could not find strong evidence matches for this query{scope}. Try a more specific object, person, or spoken phrase."
+        return (f"I could not find strong evidence matches for this query{scope}. "
+                "Try a more specific question about what was said, who was speaking, "
+                "or what objects appeared in the video.")
 
-    lines = [f"Found evidence using: {', '.join(sorted(set(strategies)))}"]
+    lines = []
+
+    if structured_evidence and structured_evidence.get("captions_pending"):
+        lines.append(
+            "*Note: caption indexing for this video is still in progress; "
+            "visual descriptions below may be incomplete.*"
+        )
+        lines.append("")
+
+    # ── Contradiction evidence (highest priority for legal questions) ─────
+    if structured_evidence:
+        contradictions = structured_evidence.get("contradiction_results", [])
+        if contradictions:
+            lines.append("### ⚠️ Testimony Contradictions Detected")
+            lines.append("")
+            for i, c in enumerate(contradictions[:5]):
+                speaker = c.get("speaker_id", "Unknown Speaker")
+                conf = c.get("confidence", 0)
+                stmt_a = c.get("stmt_a_text", "")
+                stmt_b = c.get("stmt_b_text", "")
+                ts_a = c.get("stmt_a_timestamp", 0)
+                ts_b = c.get("stmt_b_timestamp", 0)
+                vid_a = c.get("stmt_a_video_id", "")
+                vid_b = c.get("stmt_b_video_id", "")
+                lines.append(f"**Contradiction {i+1}** — Speaker: **{speaker}** (Confidence: {conf:.0%})")
+                lines.append(f"- **Session 1** [{int(ts_a)//60:02d}:{int(ts_a)%60:02d}] (video `{vid_a}`):")
+                lines.append(f'  > "{stmt_a}"')
+                lines.append(f"- **Session 2** [{int(ts_b)//60:02d}:{int(ts_b)%60:02d}] (video `{vid_b}`):")
+                lines.append(f'  > "{stmt_b}"')
+                explanation = c.get("explanation", "")
+                if explanation:
+                    lines.append(f"- **Analysis**: {explanation}")
+                lines.append("")
+        elif any("contradiction" in s.lower() for s in strategies):
+            lines.append("### ✅ No Testimony Contradictions Found")
+            lines.append("No conflicting statements were detected across the uploaded sessions for this case.")
+            lines.append("")
+
+    # ── Speech/transcript evidence (most valuable for courtroom analysis) ─
+    if structured_evidence:
+        asr = structured_evidence.get("asr_results", [])
+        if asr:
+            lines.append("### 🎙️ Relevant Speech/Testimony")
+            lines.append("")
+            for seg in asr[:8]:
+                st = seg.get("start_time", 0)
+                et = seg.get("end_time", 0)
+                text = seg.get("content", "")
+                speaker = seg.get("speaker_id", "")
+                role = seg.get("role", "")
+                vid = seg.get("video_id", "")
+
+                ts_str = f"[{int(st)//60:02d}:{int(st)%60:02d} – {int(et)//60:02d}:{int(et)%60:02d}]"
+                speaker_label = ""
+                if speaker and role and role != "unknown":
+                    speaker_label = f"**{role.title()}** ({speaker})"
+                elif speaker:
+                    speaker_label = f"**{speaker}**"
+
+                if speaker_label:
+                    lines.append(f"- {ts_str} {speaker_label} (video `{vid}`):")
+                    lines.append(f'  > "{text}"')
+                else:
+                    lines.append(f'- {ts_str}: "{text}"')
+            lines.append("")
+
+    # ── Detection/relation evidence ──────────────────────────────────────
+    if structured_evidence:
+        det = structured_evidence.get("detection_results", {})
+        if det:
+            lines.append("### 🔍 Object Detection")
+            for cls, result in det.items():
+                if isinstance(result, dict):
+                    counts = result.get("counts", {})
+                    for obj_cls, cnt in counts.items():
+                        lines.append(f"- **{obj_cls}**: {cnt} instances (max in any frame)")
+            lines.append("")
+
+        rels = structured_evidence.get("relation_results", [])
+        if rels:
+            lines.append("### 🔗 Spatial Relations")
+            for rel in rels[:5]:
+                lines.append(f"- {rel.get('triple', '')}")
+            lines.append("")
+
+    # ── Visual/caption evidence (only show if we don't have better data) ─
+    has_rich_evidence = bool(lines)  # We already have transcripts/contradictions
+    if not has_rich_evidence or is_image_search:
+        display_sources = sources[:5] if is_image_search else sources[:3]
+        if display_sources:
+            lines.append("### 🎬 Visual Evidence")
+            lines.append("")
+            for i, hit in enumerate(display_sources):
+                vid = hit.get("video_id", "")
+                time_str = _format_timestamp(hit)
+                desc = hit.get("description", hit.get("content", ""))
+                score = hit.get("score", 0)
+                source_idx = hit.get("source_index", "")
+
+                lines.append(f"**Match {i+1}** — {time_str} in video `{vid}` ({score:.0%} confidence, {source_idx})")
+                if desc:
+                    lines.append(f"- {desc}")
+                lines.append("")
+
+    if not lines:
+        return f"I found some potential matches but could not synthesize a clear answer for: \"{query}\""
 
     return "\n".join(lines)
 
 
-def run_agent(query: str, video_id: str = None, image_path: str = None, conversation_history: list = None) -> dict:
+# ── Main Agent Entry Point ───────────────────────────────────────────────────
+
+def run_agent(query: str, video_id: str = None, image_path: str = None,
+              conversation_history: list = None, case_id: str = None) -> dict:
     """
-    Run the agentic loop:
-    1. Send query + tools to Groq
-    2. If tool_calls → execute → send results back
-    3. Return final answer with sources
+    Run the full 3-stage VideoRAG pipeline:
+    ① Query Decouple — decompose user query
+    ② Multimodal Retrieval — search across all indexes
+    ③ Merge & Rearrange — assemble evidence and generate answer
     """
-    sources, strategies = _collect_sources(query=query, video_id=video_id, image_path=image_path)
-    
-    answer = None
-    if GROQ_API_KEY and sources:
+    is_image_search = image_path is not None
+
+    # ── Resolve case_id if not provided but video_id is known ────────────
+    if not case_id and video_id:
         try:
-            client = _get_groq_client()
-            compact_sources = [
-                {
-                    "video_id": s.get("video_id"),
-                    "timestamp": s.get("timestamp"),
-                    "start_time": s.get("start_time"),
-                    "end_time": s.get("end_time"),
-                    "source_index": s.get("source_index"),
-                    "content": s.get("content", "")[:120],
-                    "score": round(s.get("score", 0), 3),
-                }
-                for s in sources[:10]
+            from backend.services import testimony_db
+            case_id = testimony_db.get_case_id_for_video(video_id)
+        except Exception:
+            pass
+
+    # ── Stage ①: Query Decouple ──────────────────────────────────────────
+    if is_image_search:
+        decouple = {
+            "asr_query": None,
+            "visual_query": query,
+            "caption_query": query if query else None,
+            "ocr_query": None,
+            "det_classes": [],
+            "need_relations": False,
+            "check_contradictions": False,
+            "answer_type": "description",
+        }
+    else:
+        decouple = _decouple_query(query)
+
+        # Heuristic fallback: detect contradiction queries by keyword
+        q_lower = query.lower()
+        contradiction_keywords = [
+            "contradict", "contradiction", "inconsisten", "consistent",
+            "changed", "lied", "lying", "conflicting", "discrepan",
+            "testimony", "recant",
+        ]
+        if any(kw in q_lower for kw in contradiction_keywords):
+            decouple["check_contradictions"] = True
+            if decouple.get("answer_type") == "general":
+                decouple["answer_type"] = "contradiction"
+
+        # Heuristic: always search transcripts for courtroom analysis
+        # Speech is the richest evidence source for legal video
+        if not decouple.get("asr_query"):
+            courtroom_keywords = [
+                "speaker", "said", "say", "speak", "spoke", "told", "tell",
+                "testif", "witness", "judge", "counsel", "lawyer", "attorney",
+                "argument", "hearing", "proceed", "case", "court", "trial",
+                "contradict", "testimony", "objection", "ruling", "verdict",
+                "what happened", "what was discussed", "who",
             ]
+            if any(kw in q_lower for kw in courtroom_keywords):
+                decouple["asr_query"] = query
 
-            if image_path:
-                task_prompt = (
-                    "The user uploaded a reference image and provided this query: "
-                    f"'{query}'.\n\n"
-                    "Based on the visual match search results below, provide a professional, structured forensic analysis report.\n"
-                    "Your response MUST be structured exactly like this:\n\n"
-                    "### Findings\n"
-                    "- State clearly if the person or object in the reference image appears in the video.\n"
-                    "- Describe what they are doing or the context of their appearance based on the search results.\n\n"
-                    "### Confirmed Timestamps\n"
-                    "- List the exact timestamps where they appear, using [MM:SS] format.\n"
-                    "- Group consecutive timestamps into ranges (e.g., [00:11] to [00:15]).\n\n"
-                    "Be highly specific, confident, and professional. Do NOT rely on prior assumptions, only use the search results. Do NOT ask follow-up questions.\n"
-                    f"Search results: {json.dumps(compact_sources)}"
-                )
-            else:
-                task_prompt = (
-                    "Based on the following video search results, provide a professional, structured forensic analysis report in response to the user's query.\n"
-                    "Your response MUST be structured exactly like this:\n\n"
-                    "### Analysis\n"
-                    "- Provide a direct answer to the user's question.\n"
-                    "- Summarize the key events, spoken words, or visual evidence found.\n\n"
-                    "### Evidence Timestamps\n"
-                    "- List the specific times where the evidence occurs using [MM:SS] format.\n"
-                    "- Group consecutive hits into ranges (e.g., [00:11] to [00:15]).\n\n"
-                    "Be highly specific, confident, and professional. Do NOT rely on prior assumptions, only use the search results. Do NOT ask follow-up questions.\n"
-                    f"Query: {query}\n"
-                    f"Search results: {json.dumps(compact_sources)}"
-                )
+        # Final fallback: if LLM didn't set asr_query and it's a general query,
+        # always search transcripts too — courtroom video analysis needs speech
+        if not decouple.get("asr_query") and decouple.get("answer_type") in ("general", "description", "contradiction"):
+            decouple["asr_query"] = query
 
-            polished = client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": task_prompt}
-                ],
-                temperature=0.1,
-                max_tokens=600,
+        logger.info("Final decouple: %s", json.dumps(decouple, indent=2))
+
+    # ── Stage ②: Multimodal Retrieval ────────────────────────────────────
+    sources, strategies, structured_evidence = _collect_sources_decoupled(
+        query=query, decouple=decouple, video_id=video_id,
+        image_path=image_path, case_id=case_id,
+    )
+
+    # ── Hard confidence gate for image search ──
+    if is_image_search:
+        best_score = max((s.get("score", 0) for s in sources), default=0) if sources else 0
+        if best_score < 0.30:
+            logger.info(f"Image search: best score {best_score:.3f} < 0.30 — no confident match.")
+            return {
+                "answer": (
+                    "### No Match Found\n\n"
+                    "The uploaded reference image does **not** match any frames in the video.\n\n"
+                    "This means the person or object in your image is **not present** in this footage.\n\n"
+                    "**Suggestions:**\n"
+                    "- Try a different reference image with better lighting or angle\n"
+                    "- Try a text description instead (e.g., \"person in red shirt\")\n"
+                    "- Upload a different video that may contain the subject"
+                ),
+                "clips": [],
+                "sources": [],
+            }
+
+    # Determine how many results to describe
+    if is_image_search:
+        max_results = 5
+        max_describe = 3
+    else:
+        max_results = 5
+        max_describe = 3
+
+    sources = sources[:max_results]
+
+    # Enrich top results with detailed descriptions
+    if sources:
+        logger.info(f"Enriching top {min(max_describe, len(sources))} results with descriptions...")
+        sources = _enrich_with_descriptions(sources, max_describe=max_describe)
+
+    # ── Stage ③: Merge & Rearrange + Final Answer ────────────────────────
+    answer = _merge_and_rearrange(
+        query=query, sources=sources, structured_evidence=structured_evidence,
+        decouple=decouple, strategies=strategies,
+        video_id=video_id, is_image_search=is_image_search,
+    )
+
+    # ── Stage ④: Citation Verification (Phase 8) ─────────────────────────
+    citations = []
+    if video_id and answer and not is_image_search:
+        try:
+            from backend.services import citation_service
+            citations = citation_service.verify_and_store_citations(
+                answer=answer, video_id=video_id,
             )
-            text = polished.choices[0].message.content
-            if text:
-                answer = text
         except Exception as e:
-            logger.warning(f"Answer generation error: {e}")
-
-    if not answer:
-        answer = _render_answer(query, sources, strategies, video_id)
+            logger.warning("Citation verification failed (non-fatal): %s", e)
 
     return {
         "answer": answer,
-        "clips": _build_clips(sources),
-        "sources": sources[:20],
+        "clips": _build_clips(sources, max_clips=max_results),
+        "sources": sources,
+        "citations": citations,
+        "contradictions": [
+            {
+                "contradiction_id": c.get("id", ""),
+                "speaker_id": c.get("speaker_id", ""),
+                "statement_a": c.get("stmt_a_text", ""),
+                "statement_b": c.get("stmt_b_text", ""),
+                "confidence": c.get("confidence", 0),
+                "explanation": c.get("explanation", ""),
+                "video_a": c.get("stmt_a_video_id"),
+                "video_b": c.get("stmt_b_video_id"),
+                "timestamp_a": c.get("stmt_a_timestamp"),
+                "timestamp_b": c.get("stmt_b_timestamp"),
+            }
+            for c in structured_evidence.get("contradiction_results", [])
+        ],
     }
 
 
-def _build_clips(all_sources: list) -> list:
-    """Build deduplicated clip list from search sources with temporally merged bounds."""
+def _build_clips(all_sources: list, max_clips: int = 5) -> list:
+    """Build deduplicated clip list from search sources with descriptions."""
     clips = []
 
     def _frame_exists(video_id: str, frame_path: str) -> bool:
@@ -420,26 +1054,30 @@ def _build_clips(all_sources: list) -> list:
         vid = src.get("video_id", "")
         ts = float(src.get("timestamp") or src.get("start_time") or 0.0)
         frame_path = src.get("frame_path", "")
-        
+        description = src.get("description", src.get("content", ""))
+
         if vid and _frame_exists(vid, frame_path):
             merged = False
             for clip in clips:
-                # Merge clips that are close to each other (e.g., within 4 seconds)
+                # Merge clips that are close to each other (within 4 seconds)
                 if clip["video_id"] == vid and abs(clip["start_time"] - ts) <= 4.0:
                     clip["start_time"] = min(clip["start_time"], ts)
                     clip["end_time"] = max(clip["end_time"], ts + 2.0)
                     if frame_path not in clip["frame_paths"]:
                         clip["frame_paths"].append(frame_path)
+                    # Keep the best description
+                    if description and len(description) > len(clip.get("description", "")):
+                        clip["description"] = description
                     merged = True
                     break
-                    
+
             if not merged:
                 clips.append({
                     "video_id": vid,
                     "start_time": ts,
                     "end_time": float(src.get("end_time", ts + 2.0)),
                     "frame_paths": [frame_path] if frame_path else [],
-                    "description": src.get("content", ""),
+                    "description": description,
                 })
-                
-    return clips[:5]  # Limit to 5 clips to avoid UI spam
+
+    return clips[:max_clips]

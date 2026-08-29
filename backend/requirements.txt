@@ -14,6 +14,10 @@ Pillow>=11.0.0
 ImageHash>=4.3.1
 sentencepiece>=0.2.0
 
+# Object Detection & OCR (Phase 3-4)
+ultralytics>=8.3.0
+easyocr>=1.7.0
+
 # Vector Database
 chromadb>=0.5.23
 
@@ -28,3 +32,8 @@ groq>=0.13.0
 # Utilities
 numpy>=1.26.4
 aiofiles>=24.1.0
+
+# Speaker Diarization & Voiceprint (Phase 6 - Novelty 1)
+# Optional: system falls back to gap-based heuristic if not installed
+pyannote.audio>=3.1
+resemblyzer>=0.1.3

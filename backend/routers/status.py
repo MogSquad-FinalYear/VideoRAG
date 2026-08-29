@@ -23,4 +23,5 @@ async def get_status(task_id: str):
         progress=t["progress"],
         message=t["message"],
         video_id=t.get("video_id"),
+        captions_ready=t.get("captions_ready", False),
     )

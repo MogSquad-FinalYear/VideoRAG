@@ -1,8 +1,9 @@
 /**
  * UploadModal — Drag-and-drop video upload dialog with progress tracking.
+ * Includes case_id field for cross-session testimony memory.
  */
 import { useState, useRef, useCallback } from 'react';
-import { uploadVideo, pollTaskStatus } from '../api/client';
+import { uploadVideo, pollTaskStatus, getSpeakerMatches } from '../api/client';
 import './UploadModal.css';
 
 const ALLOWED_TYPES = ['video/mp4', 'video/avi', 'video/quicktime', 'video/x-matroska', 'video/webm', 'video/x-flv', 'video/x-ms-wmv'];
@@ -11,6 +12,7 @@ const ALLOWED_EXTENSIONS = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.w
 export default function UploadModal({ onClose, onUploadComplete }) {
   const [dragOver, setDragOver] = useState(false);
   const [selectedFile, setSelectedFile] = useState(null);
+  const [caseId, setCaseId] = useState('');
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [processing, setProcessing] = useState(false);
@@ -65,7 +67,7 @@ export default function UploadModal({ onClose, onUploadComplete }) {
     try {
       const result = await uploadVideo(selectedFile, (progress) => {
         setUploadProgress(progress);
-      });
+      }, caseId.trim() || null);
 
       setUploading(false);
       setProcessing(true);
@@ -75,8 +77,19 @@ export default function UploadModal({ onClose, onUploadComplete }) {
         setProcessStatus(status);
       });
 
-      // Processing complete
-      onUploadComplete();
+      // Processing complete — check whether the cross-session speaker
+      // matcher (Novelty 1) left anything awaiting human confirmation.
+      const finalCaseId = result.case_id || caseId.trim() || null;
+      let hasPendingMatches = false;
+      if (finalCaseId) {
+        try {
+          const matches = await getSpeakerMatches(finalCaseId);
+          hasPendingMatches = (matches.pending || []).length > 0;
+        } catch {
+          // Non-fatal — the case dashboard can still be opened manually.
+        }
+      }
+      onUploadComplete(finalCaseId, hasPendingMatches);
     } catch (err) {
       setError(err.message || 'Upload failed');
       setUploading(false);
@@ -111,6 +124,27 @@ export default function UploadModal({ onClose, onUploadComplete }) {
             </button>
           )}
         </div>
+
+        {/* Case ID Input */}
+        {!isWorking && (
+          <div className="upload-modal__case-id">
+            <label className="upload-modal__case-label" htmlFor="case-id-input">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+              </svg>
+              Case ID
+              <span className="upload-modal__case-hint">(group videos from the same trial for contradiction detection)</span>
+            </label>
+            <input
+              id="case-id-input"
+              className="upload-modal__case-input"
+              type="text"
+              value={caseId}
+              onChange={(e) => setCaseId(e.target.value)}
+              placeholder="e.g., trial_001 (leave empty for auto-generated)"
+            />
+          </div>
+        )}
 
         {/* Drop Zone */}
         {!isWorking && !selectedFile && (
@@ -203,6 +237,12 @@ export default function UploadModal({ onClose, onUploadComplete }) {
               <span className="upload-modal__processing-pct">
                 {Math.round((processStatus.progress || 0) * 100)}%
               </span>
+              {processStatus.progress >= 1 && processStatus.captions_ready === false && (
+                <span className="upload-modal__captions-note">
+                  Captions still indexing in the background — some visual
+                  descriptions may be incomplete until this finishes.
+                </span>
+              )}
             </div>
           </div>
         )}

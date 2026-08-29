@@ -19,13 +19,35 @@ _device = "cpu"
 _label_embeddings = None
 
 _LABELS = [
-    "person", "man", "woman", "group of people", "face closeup", "crowd",
-    "car", "truck", "motorcycle", "bus", "street", "parking lot",
+    # People & identity
+    "person", "man", "woman", "child", "group of people", "face closeup",
+    "crowd", "pedestrian", "suspect", "bystander",
+    # Vehicles
+    "car", "truck", "motorcycle", "bicycle", "bike", "bus", "van",
+    "auto rickshaw", "scooter", "ambulance", "police car",
+    # Vehicle actions & events
+    "car accident", "vehicle collision", "car crash", "car hitting bike",
+    "car hitting motorcycle", "vehicle speeding", "traffic",
+    "vehicle parked", "vehicle driving on road",
+    # Locations & scenes
+    "street", "road", "highway", "intersection", "parking lot",
     "building", "office", "room", "corridor", "door", "window",
+    "sidewalk", "alley", "bridge", "tunnel",
+    # Objects
     "table", "chair", "bag", "backpack", "phone", "laptop",
+    "weapon", "knife", "gun", "blood", "evidence bag",
+    "helmet", "license plate", "sign", "traffic light",
+    # Sports & venues
     "sports field", "basketball court", "stadium", "scoreboard",
-    "outdoor daylight", "outdoor night", "indoor scene", "camera close shot",
-    "walking", "running", "talking", "holding object", "sitting", "standing",
+    # Actions & events
+    "walking", "running", "fighting", "arguing", "falling",
+    "hitting", "kicking", "punching", "chasing", "fleeing",
+    "talking", "holding object", "sitting", "standing",
+    "stealing", "breaking", "climbing", "jumping",
+    # Conditions
+    "outdoor daylight", "outdoor night", "indoor scene",
+    "rain", "fog", "camera close shot", "surveillance footage",
+    "cctv view", "dashcam view",
 ]
 
 
@@ -83,7 +105,11 @@ def _load_label_embeddings() -> np.ndarray:
 
 
 def _caption_batch_clip(image_paths: list[str]) -> list[str]:
-    """Generate fast pseudo-captions by matching frame embeddings to label prompts."""
+    """Generate fast pseudo-captions by matching frame embeddings to label prompts.
+
+    Uses top-5 matching labels with a lower threshold to produce richer,
+    more descriptive captions for better downstream retrieval.
+    """
     if not image_paths:
         return []
 
@@ -92,24 +118,106 @@ def _caption_batch_clip(image_paths: list[str]) -> list[str]:
     if not img_emb:
         return ["" for _ in image_paths]
 
+    # Categorize labels for structured captions
+    _ACTION_LABELS = {
+        "walking", "running", "fighting", "arguing", "falling",
+        "hitting", "kicking", "punching", "chasing", "fleeing",
+        "talking", "holding object", "sitting", "standing",
+        "stealing", "breaking", "climbing", "jumping",
+    }
+    _EVENT_LABELS = {
+        "car accident", "vehicle collision", "car crash", "car hitting bike",
+        "car hitting motorcycle", "vehicle speeding",
+    }
+
     path_to_caption = {}
     for emb, path in zip(img_emb, valid_paths):
         vec = np.array(emb, dtype=np.float32)
         sims = label_emb @ vec
-        top_idx = np.argsort(sims)[-2:][::-1]
-        top_labels = [_LABELS[i] for i in top_idx if sims[i] > 0.19]
+        top_idx = np.argsort(sims)[-5:][::-1]  # Top-5 labels
+        top_labels = [_LABELS[i] for i in top_idx if sims[i] > 0.14]
 
-        if len(top_labels) >= 2:
-            caption = f"scene with {top_labels[0]} and {top_labels[1]}"
-        elif len(top_labels) == 1:
-            caption = f"scene with {top_labels[0]}"
-        else:
-            caption = "scene in video"
+        if not top_labels:
+            path_to_caption[path] = "unidentified scene in video"
+            continue
+
+        # Separate into actions/events vs objects/scenes
+        actions = [l for l in top_labels if l in _ACTION_LABELS or l in _EVENT_LABELS]
+        objects = [l for l in top_labels if l not in _ACTION_LABELS and l not in _EVENT_LABELS]
+
+        parts = []
+        if actions and objects:
+            parts.append(f"{', '.join(objects)} with {', '.join(actions)}")
+        elif objects:
+            parts.append(', '.join(objects))
+        elif actions:
+            parts.append(', '.join(actions))
+
+        caption = f"a scene showing {' and '.join(parts)}" if parts else "unidentified scene"
+
+        # Add all detected labels as keywords for better keyword-based retrieval
+        all_keywords = ' '.join(top_labels)
+        caption = f"{caption}. Keywords: {all_keywords}"
 
         path_to_caption[path] = caption
 
     captions = [path_to_caption.get(p, "") for p in image_paths]
     return captions
+
+
+def describe_frame_clip(image_path: str) -> str:
+    """Generate a rich text description of a single frame using CLIP label matching.
+
+    This is faster and more reliable than BLIP — uses the already-loaded CLIP model
+    to match the frame against our label vocabulary. Produces richer descriptions
+    than the batch captioner by using more labels and confidence scoring.
+    """
+    try:
+        label_emb = _load_label_embeddings()
+        emb_list, valid = embedding_service.embed_batch([image_path], batch_size=1)
+        if not emb_list or not valid:
+            return ""
+
+        vec = np.array(emb_list[0], dtype=np.float32)
+        sims = label_emb @ vec
+        top_idx = np.argsort(sims)[-5:][::-1]  # Top-5 labels for richer detail
+
+        # Classify labels by confidence
+        high_conf = [_LABELS[i] for i in top_idx if sims[i] > 0.24]
+        med_conf = [_LABELS[i] for i in top_idx if 0.18 < sims[i] <= 0.24]
+
+        parts = []
+        if high_conf:
+            parts.append(f"The frame clearly shows: {', '.join(high_conf)}")
+        if med_conf:
+            parts.append(f"Also possibly visible: {', '.join(med_conf)}")
+
+        if not parts:
+            low_conf = [_LABELS[i] for i in top_idx[:2] if sims[i] > 0.14]
+            if low_conf:
+                parts.append(f"The frame appears to contain: {', '.join(low_conf)}")
+            else:
+                return "A frame from the video with indeterminate content."
+
+        # Add scene context based on detected labels
+        all_detected = high_conf + med_conf
+        all_lower = " ".join(all_detected).lower()
+
+        if any(t in all_lower for t in ["person", "man", "woman", "crowd", "pedestrian", "suspect"]):
+            parts.append("Human subjects are present in the scene.")
+        if any(t in all_lower for t in ["car", "truck", "vehicle", "motorcycle", "bus", "bicycle"]):
+            parts.append("Vehicles or transport are visible.")
+        if any(t in all_lower for t in ["accident", "collision", "crash", "hitting"]):
+            parts.append("An impact or collision event appears to be occurring.")
+        if any(t in all_lower for t in ["outdoor", "street", "road", "highway", "parking"]):
+            parts.append("The scene is outdoors.")
+        elif any(t in all_lower for t in ["indoor", "room", "office", "corridor"]):
+            parts.append("The scene is indoors.")
+
+        return ". ".join(parts) + "."
+    except Exception as e:
+        logger.warning(f"CLIP frame description failed for {image_path}: {e}")
+        return ""
 
 
 def caption_batch(image_paths: list[str], batch_size: int = 8) -> list[str]:
@@ -178,3 +286,52 @@ def caption_batch(image_paths: list[str], batch_size: int = 8) -> list[str]:
         logger.info(f"Captioned batch {i // batch_size + 1}, total: {len(all_captions)}/{len(image_paths)}")
 
     return all_captions
+
+
+def describe_frame_detailed(image_path: str) -> str:
+    """Generate a detailed description of a specific frame using BLIP.
+
+    This is called on-demand for top search results (not during indexing),
+    so we can afford to use more beam search and multiple prompts for quality.
+    """
+    load_blip_model()
+    try:
+        image = Image.open(image_path).convert("RGB")
+        prompts = [
+            "a detailed description of this image:",
+            "this scene shows",
+        ]
+        descriptions = []
+        for prompt in prompts:
+            inputs = _blip_processor(image, text=prompt, return_tensors="pt").to(_device)
+            with torch.no_grad():
+                output = _blip_model.generate(
+                    **inputs,
+                    max_new_tokens=60,
+                    num_beams=3,
+                    repetition_penalty=1.5,
+                )
+            caption = _blip_processor.decode(output[0], skip_special_tokens=True).strip()
+            if caption and caption not in descriptions:
+                descriptions.append(caption)
+
+        if descriptions:
+            combined = descriptions[0]
+            if len(descriptions) > 1:
+                second = descriptions[1]
+                if second.lower() not in combined.lower():
+                    combined = f"{combined}. Additionally: {second}"
+            return combined
+        return "Scene from video"
+    except Exception as e:
+        logger.warning(f"Detailed captioning failed for {image_path}: {e}")
+        return ""
+
+
+def describe_frames_batch(image_paths: list[str]) -> list[str]:
+    """Generate detailed descriptions for multiple frames efficiently.
+
+    Processes frames through BLIP one at a time but with richer prompts.
+    Designed for small batches (2-5 frames) from search results.
+    """
+    return [describe_frame_detailed(p) for p in image_paths]

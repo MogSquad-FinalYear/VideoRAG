@@ -1,0 +1,25 @@
+{
+  "n_positive_frames": 73,
+  "n_negative_frames": 616,
+  "roc_auc": 0.959,
+  "eer": 0.021,
+  "eer_threshold": 0.842,
+  "operating_points": {
+    "chat_min_score (0.35)": {
+      "threshold": 0.35,
+      "precision": 0.483,
+      "recall": 0.959,
+      "tp": 70,
+      "fp": 75,
+      "fn": 3
+    },
+    "hard_gate (0.30)": {
+      "threshold": 0.3,
+      "precision": 0.131,
+      "recall": 0.959,
+      "tp": 70,
+      "fp": 464,
+      "fn": 3
+    }
+  }
+}

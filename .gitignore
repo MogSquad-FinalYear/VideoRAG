@@ -1,4 +1,6 @@
 venv/
+.venv/
+.local-headers/
 .env
 .env.example
 __pycache__/
@@ -13,3 +15,6 @@ frontend/dist/
 *.log
 .DS_Store
 Thumbs.db
+model_cache/
+*.pt
+.tex-local/

@@ -1,0 +1,77 @@
+{
+  "n_pairs": 10,
+  "n_same_speaker_pairs": 3,
+  "n_different_speaker_pairs": 7,
+  "roc_auc": 1.0,
+  "configured_threshold": 0.75,
+  "at_configured_threshold": {
+    "precision": 1.0,
+    "recall": 1.0,
+    "tp": 3,
+    "fp": 0,
+    "fn": 0,
+    "tn": 7
+  },
+  "pairs": [
+    {
+      "a": "session1",
+      "b": "session2",
+      "cosine_similarity": 0.9206,
+      "same_speaker_ground_truth": true
+    },
+    {
+      "a": "session1",
+      "b": "session3",
+      "cosine_similarity": 0.9535,
+      "same_speaker_ground_truth": true
+    },
+    {
+      "a": "session1",
+      "b": "obama",
+      "cosine_similarity": 0.516,
+      "same_speaker_ground_truth": false
+    },
+    {
+      "a": "session1",
+      "b": "clancy2",
+      "cosine_similarity": 0.4963,
+      "same_speaker_ground_truth": false
+    },
+    {
+      "a": "session2",
+      "b": "session3",
+      "cosine_similarity": 0.9182,
+      "same_speaker_ground_truth": true
+    },
+    {
+      "a": "session2",
+      "b": "obama",
+      "cosine_similarity": 0.488,
+      "same_speaker_ground_truth": false
+    },
+    {
+      "a": "session2",
+      "b": "clancy2",
+      "cosine_similarity": 0.4566,
+      "same_speaker_ground_truth": false
+    },
+    {
+      "a": "session3",
+      "b": "obama",
+      "cosine_similarity": 0.4956,
+      "same_speaker_ground_truth": false
+    },
+    {
+      "a": "session3",
+      "b": "clancy2",
+      "cosine_similarity": 0.4991,
+      "same_speaker_ground_truth": false
+    },
+    {
+      "a": "obama",
+      "b": "clancy2",
+      "cosine_similarity": 0.6501,
+      "same_speaker_ground_truth": false
+    }
+  ]
+}

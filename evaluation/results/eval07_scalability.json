@@ -1,0 +1,99 @@
+{
+  "n_runs": 15,
+  "n_warm": 7,
+  "n_cold": 8,
+  "warm_mean_overhead_s_beyond_duration": 32.4,
+  "cold_start_extra_cost_s_estimate": 182.6,
+  "runs": [
+    {
+      "video_id": "64676f3b-1c5",
+      "duration_s": 4.0,
+      "processing_s": 1304.4,
+      "cold_start": true
+    },
+    {
+      "video_id": "346dd588-13e",
+      "duration_s": 4.0,
+      "processing_s": 18.8,
+      "cold_start": true
+    },
+    {
+      "video_id": "5963ac97-fdf",
+      "duration_s": 4.0,
+      "processing_s": 21.5,
+      "cold_start": true
+    },
+    {
+      "video_id": "83b964c5-b7d",
+      "duration_s": 3.0,
+      "processing_s": 10.1,
+      "cold_start": false
+    },
+    {
+      "video_id": "716d12b3-218",
+      "duration_s": 3.0,
+      "processing_s": 2.9,
+      "cold_start": true
+    },
+    {
+      "video_id": "15451208-79a",
+      "duration_s": 214.2,
+      "processing_s": 45.2,
+      "cold_start": true
+    },
+    {
+      "video_id": "6244a6c0-ff9",
+      "duration_s": 6.0,
+      "processing_s": 11.1,
+      "cold_start": false
+    },
+    {
+      "video_id": "b2a91a55-681",
+      "duration_s": 1395.0,
+      "processing_s": 142.9,
+      "cold_start": true
+    },
+    {
+      "video_id": "dac0ae13-04c (pre-fix, OOM'd internally)",
+      "duration_s": 1316.5,
+      "processing_s": 144.2,
+      "cold_start": false
+    },
+    {
+      "video_id": "b730910d-141 (post-fix rerun)",
+      "duration_s": 1316.5,
+      "processing_s": 151.1,
+      "cold_start": true
+    },
+    {
+      "video_id": "94731c1d-387",
+      "duration_s": 4.0,
+      "processing_s": 33.0,
+      "cold_start": true
+    },
+    {
+      "video_id": "be7b9715-a02",
+      "duration_s": 3.0,
+      "processing_s": 10.3,
+      "cold_start": false
+    },
+    {
+      "video_id": "e8a749f2-0bb",
+      "duration_s": 6.0,
+      "processing_s": 11.3,
+      "cold_start": false
+    },
+    {
+      "video_id": "9fa69b5d-e50",
+      "duration_s": 214.2,
+      "processing_s": 38.7,
+      "cold_start": false
+    },
+    {
+      "video_id": "a457b964-073",
+      "duration_s": 3.0,
+      "processing_s": 0.9,
+      "cold_start": false
+    }
+  ]
+}
