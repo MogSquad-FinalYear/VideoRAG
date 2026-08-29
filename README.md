@@ -30,6 +30,8 @@ question, then returns the matching clips.
 - **Local embedded database** — ChromaDB, persisted to disk. No external
   database service required.
 
+<img src="kubrik.png" width="1000"> 
+
 ## Technology stack
 
 ### Backend
