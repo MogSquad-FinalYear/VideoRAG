@@ -1,144 +1,142 @@
-# VideoRAG 🔍🎬
+# VideoRAG
 
-**VideoRAG** is a full-stack, multimodal Retrieval-Augmented Generation (RAG) intelligence platform built for forensic video analysis. It allows investigators to upload evidence videos and query them using natural language. 
+VideoRAG is a full-stack, multimodal retrieval-augmented generation system for
+forensic video analysis. Investigators upload evidence videos and query them
+using natural language.
 
-Behind the scenes, VideoRAG processes video content entirely locally using edge AI models to extract speech transversity, frame-by-frame visual similarity embeddings, and text scene captions. An Agentic LLM (powered by Groq) automatically decides what strategy or collection of strategies to use to query the video, returning rich, playable video clips directly matched to the user's inquiry.
+Video content is processed entirely locally: speech transcripts, frame-by-frame
+visual embeddings, and scene captions are all extracted on-device. An agentic
+LLM (via Groq) decides which combination of these indices to search for a given
+question, then returns the matching clips.
 
-## ✨ Features
+## Features
 
-- **Multimodal Video Indexing:** 
-  - **Speech Index** powered by OpenAI's Whisper (Timeline synced spoken dialog).
-  - **Visual Similarity Index** powered by OpenCLIP (Image-to-Video and advanced visual feature matching).
-  - **Scene Context Index** powered by Salesforce's BLIP-Image-Captioning (Query visual scenes directly with natural text).
-- **Agentic Routing Loop:** Driven by a Groq-hosted Llama-4 Scout 17B LLM. Uses tool-calling (FastMCP-style logic) to independently choose which local video indices to search based on the investigator's prompt.
-- **Forensic UI Dashboard:** A dark-themed, glass-morphism dashboard built in React + Vite, equipped with collapsible sidebars, real-time XHR upload progress indicators, LLM response streaming, and interactive frame-by-frame video clip viewing.
-- **Local Embedded Database:** Uses ChromaDB embedded on the disk to store and query the generated embeddings. **No external cloud database needed**.
+- **Multimodal video indexing** — a speech index (Whisper, timeline-synced
+  dialogue), a visual similarity index (OpenCLIP, image-to-video matching), and
+  a scene-context index (BLIP captioning, natural-language scene queries).
+- **Agentic routing** — a Groq-hosted Llama-4 Scout 17B model uses tool-calling
+  to decide which local indices to search for a given prompt, rather than
+  running every index on every query.
+- **Forensic UI** — a React + Vite dashboard with real-time upload progress,
+  streaming LLM responses, and frame-by-frame clip viewing.
+- **Local embedded database** — ChromaDB, persisted to disk. No external
+  database service required.
 
-## 🛠 Technology Stack
+## Technology stack
 
 ### Backend
-- **Framework**: `FastAPI` + `Uvicorn`
-- **Agent & LLM**: `Groq` API (`llama-4-scout-17b-16e-instruct`)
-- **Computer Vision Extraction**: `OpenCV`, `imageio-ffmpeg`
-- **AI Models (Running Locally)**: 
-  - `openai-whisper` (Base/Tiny)
-  - `open_clip` (ViT-B-32)
-  - `transformers` (BLIP Image Captioning Base)
-- **Vector Database**: `ChromaDB` Persistent Client
+- Framework: FastAPI + Uvicorn
+- Agent/LLM: Groq API (`llama-4-scout-17b-16e-instruct`)
+- Video extraction: OpenCV, imageio-ffmpeg
+- Local models: openai-whisper (base/tiny), open_clip (ViT-B-32), transformers
+  (BLIP image captioning)
+- Vector database: ChromaDB (persistent client)
 
 ### Frontend
-- **Framework**: `React 19` + `Vite`
-- **Styling**: Pure CSS (CSS Variables + Glassmorphism aesthetic)
+- Framework: React 19 + Vite
+- Styling: plain CSS (CSS variables, glassmorphism aesthetic)
 
 ---
 
-## ⚖️ Courtroom-evidence novelty layers
+## Courtroom-evidence novelty layers
 
-Beyond the base multimodal RAG pipeline, three novelty layers target the specific
-needs of courtroom evidence review:
+Beyond the base multimodal RAG pipeline, three novelty layers target the
+specific needs of courtroom evidence review:
 
-1. **Cross-session speaker identification.** Voiceprints extracted per session are
-   matched against a case-wide speaker registry (`backend/services/speaker_service.py`),
-   so the same witness is recognized across multiple video sessions in a case. Every
-   auto-match is surfaced to the user for confirmation or correction before it's
-   trusted downstream — never applied silently — via the **Speakers** tab of the
-   in-app **Case Panel** (`frontend/src/components/CasePanel.jsx`), backed by
+1. **Cross-session speaker identification.** Voiceprints extracted per session
+   are matched against a case-wide speaker registry
+   (`backend/services/speaker_service.py`), so the same witness is recognized
+   across multiple video sessions in a case. Every auto-match is surfaced to
+   the user for confirmation or correction before it's trusted downstream,
+   never applied silently, via the Speakers tab of the in-app Case Panel
+   (`frontend/src/components/CasePanel.jsx`), backed by
    `GET/POST /cases/{case_id}/speaker-matches`.
-2. **Cross-session testimony memory + contradiction detection.** Every statement a
-   confirmed speaker makes is logged to a per-case testimony ledger
-   (`backend/services/testimony_db.py`). New statements are checked against a
-   speaker's prior statements in the same case, and flagged contradictions are
-   surfaced in the **Testimony** and **Contradictions** tabs of the Case Panel,
-   backed by `GET /cases/{case_id}/testimony` and `/contradictions`.
-3. **Citation verification.** Answers returned by the chat agent carry citations
-   (timestamp range, speaker, source video) that are checked against the underlying
-   evidence before being shown, so a claim in an answer can be traced back to an
-   exact, verifiable clip.
+2. **Cross-session testimony memory and contradiction detection.** Every
+   statement a confirmed speaker makes is logged to a per-case testimony
+   ledger (`backend/services/testimony_db.py`). New statements are checked
+   against a speaker's prior statements in the same case, and flagged
+   contradictions are surfaced in the Testimony and Contradictions tabs of the
+   Case Panel, backed by `GET /cases/{case_id}/testimony` and
+   `/contradictions`.
+3. **Citation verification.** Answers from the chat agent carry citations
+   (timestamp range, speaker, source video) that are checked against the
+   underlying evidence before being shown, so a claim in an answer traces back
+   to an exact, verifiable clip.
 
-## 📊 Evaluation
+## Evaluation
 
 `evaluation/` contains a seven-part evaluation of the system, run against real
-uploaded videos (including two real courtroom-trial livestream recordings) rather
-than simulated data: timestamp fidelity, multi-modal retrieval recall, image-to-video
-search, cross-session speaker verification, contradiction detection, citation
-verification, and scalability/robustness. See
-[`evaluation/EVALUATION.md`](evaluation/EVALUATION.md) for methodology, per-eval
-sample sizes, and results; raw metrics are in `evaluation/results/*.json` and
-paper-ready figures in `evaluation/figures/*.png`.
+uploaded videos, including two courtroom-trial livestream recordings, rather
+than simulated data: timestamp fidelity, multi-modal retrieval recall,
+image-to-video search, cross-session speaker verification, contradiction
+detection, citation verification, and scalability/robustness. See
+[`evaluation/EVALUATION.md`](evaluation/EVALUATION.md) for methodology,
+per-eval sample sizes, and results. Raw metrics are in
+`evaluation/results/*.json`, figures in `evaluation/figures/*.png`.
 
-## 📄 Paper
+## Paper
 
-`paper/paper.tex` is the accompanying paper, submitted to **ICMLDE**
-(International Conference on Machine Learning and Data Engineering), built on the
-results in `evaluation/`.
+`paper/paper.tex` is the accompanying paper, submitted to ICMLDE
+(International Conference on Machine Learning and Data Engineering), built on
+the results in `evaluation/`.
 
 ---
 
-## 🚀 Getting Started
+## Getting started
 
-### 1. Prerequisites
-- **Python 3.10+**
-- **Node.js 18+**
-- **NVIDIA GPU** (Optional, but highly recommended for fast Whisper/CLIP processing).
-- **Groq API Key**: Go to [console.groq.com](https://console.groq.com/) and grab a free API Key.
+### Prerequisites
+- Python 3.10+
+- Node.js 18+
+- An NVIDIA GPU is optional but speeds up Whisper/CLIP processing
+  considerably.
+- A Groq API key — get one at [console.groq.com](https://console.groq.com/).
 
-### 2. Setting Up the Backend
+### Backend setup
 
-1. Navigate to the root folder:
-   ```bash
-   cd VideoRAG
-   ```
-2. Create and activate a Virtual Environment:
-   ```bash
-   python -m venv venv
-   # Windows
-   venv\Scripts\activate
-   # macOS/Linux
-   source venv/bin/activate
-   ```
-3. Install the dependencies:
-   ```bash
-   pip install -r backend/requirements.txt
-   ```
-   *(Note: if you face issues installing `openai-whisper` regarding `pkg_resources`, ensure you downgrade setup tools with `pip install "setuptools<81"` and try again).*
-   
-4. Configure Environment Variables:
-   Open the `.env` file in the root directory and ensure you paste your GROQ API key:
-   ```env
-   GROQ_API_KEY=your_groq_api_key_here
-   ```
+```bash
+cd VideoRAG
+python -m venv venv
+source venv/bin/activate   # Windows: venv\Scripts\activate
+pip install -r backend/requirements.txt
+```
 
-5. Start the backend:
-   ```bash
-   python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
-   ```
+If `openai-whisper` fails to install over a `pkg_resources` error, downgrade
+setuptools first: `pip install "setuptools<81"`, then retry.
 
-### 3. Setting Up the Frontend
+Set your Groq API key in `.env`:
 
-1. Open a new terminal and navigate to the frontend directory:
-   ```bash
-   cd VideoRAG/frontend
-   ```
-2. Install the JavaScript dependencies:
-   ```bash
-   npm install
-   ```
-3. Start the Vite development server:
-   ```bash
-   npm run dev
-   ```
-4. Access the UI by navigating your browser to `http://localhost:5173/`. 
+```env
+GROQ_API_KEY=your_groq_api_key_here
+```
 
-*(Note: The Vite config includes a proxy redirecting `http://localhost:5173/api/:routes` to `http://localhost:8000/` automatically to avoid CORS issues).*
+Start the backend:
 
-## 🧠 Usage
+```bash
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
+```
+
+### Frontend setup
+
+```bash
+cd VideoRAG/frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173/`. The Vite dev server proxies `/api/*` requests
+to `http://localhost:8000/`, so no separate CORS configuration is needed.
+
+## Usage
 
 1. Open the UI at `http://localhost:5173`.
-2. Click **Upload Evidence** on the sidebar and select an `.mp4`, `.mov`, `.mkv`, or `.avi` video.
-3. The platform will automatically extract audio, slice frames, embed images with CLIP, transcribe text with Whisper, and store them securely into `ChromaDB`.
-4. In the Chat interface, ask natural language questions such as:
-   - *"When did someone mention a weapon?"*
-   - *"Do you see any red cars driving?"*
-   - *"Show me exact frames where the suspect is walking outside."* 
+2. Click "Upload Evidence" in the sidebar and select an `.mp4`, `.mov`,
+   `.mkv`, or `.avi` file.
+3. The system extracts audio, samples frames, embeds them with CLIP,
+   transcribes speech with Whisper, and stores everything in ChromaDB.
+4. Ask questions in the chat, for example:
+   - "When did someone mention a weapon?"
+   - "Do you see any red cars driving?"
+   - "Show me frames where the suspect is walking outside."
 
-Kubrick (the built-in Agent) will retrieve the exact clips directly correlated with your request.
+The agent (Kubrick) retrieves the clips matching your question, with
+citations back to the source video and timestamp.
