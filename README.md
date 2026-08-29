@@ -32,6 +32,48 @@ Behind the scenes, VideoRAG processes video content entirely locally using edge 
 
 ---
 
+## ⚖️ Courtroom-evidence novelty layers
+
+Beyond the base multimodal RAG pipeline, three novelty layers target the specific
+needs of courtroom evidence review:
+
+1. **Cross-session speaker identification.** Voiceprints extracted per session are
+   matched against a case-wide speaker registry (`backend/services/speaker_service.py`),
+   so the same witness is recognized across multiple video sessions in a case. Every
+   auto-match is surfaced to the user for confirmation or correction before it's
+   trusted downstream — never applied silently — via the **Speakers** tab of the
+   in-app **Case Panel** (`frontend/src/components/CasePanel.jsx`), backed by
+   `GET/POST /cases/{case_id}/speaker-matches`.
+2. **Cross-session testimony memory + contradiction detection.** Every statement a
+   confirmed speaker makes is logged to a per-case testimony ledger
+   (`backend/services/testimony_db.py`). New statements are checked against a
+   speaker's prior statements in the same case, and flagged contradictions are
+   surfaced in the **Testimony** and **Contradictions** tabs of the Case Panel,
+   backed by `GET /cases/{case_id}/testimony` and `/contradictions`.
+3. **Citation verification.** Answers returned by the chat agent carry citations
+   (timestamp range, speaker, source video) that are checked against the underlying
+   evidence before being shown, so a claim in an answer can be traced back to an
+   exact, verifiable clip.
+
+## 📊 Evaluation
+
+`evaluation/` contains a seven-part evaluation of the system, run against real
+uploaded videos (including two real courtroom-trial livestream recordings) rather
+than simulated data: timestamp fidelity, multi-modal retrieval recall, image-to-video
+search, cross-session speaker verification, contradiction detection, citation
+verification, and scalability/robustness. See
+[`evaluation/EVALUATION.md`](evaluation/EVALUATION.md) for methodology, per-eval
+sample sizes, and results; raw metrics are in `evaluation/results/*.json` and
+paper-ready figures in `evaluation/figures/*.png`.
+
+## 📄 Paper
+
+`paper/paper.tex` is the accompanying paper, submitted to **ICMLDE**
+(International Conference on Machine Learning and Data Engineering), built on the
+results in `evaluation/`.
+
+---
+
 ## 🚀 Getting Started
 
 ### 1. Prerequisites
