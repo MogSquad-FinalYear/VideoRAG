@@ -1,4 +1,12 @@
+<center>
+
 # VideoRAG
+
+<img src="vr.png" width="1000">
+
+</center>
+
+
 
 VideoRAG is a full-stack, multimodal retrieval-augmented generation system for
 forensic video analysis. Investigators upload evidence videos and query them
