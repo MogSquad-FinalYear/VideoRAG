@@ -1,0 +1,122 @@
+{
+  "n_cases": 10,
+  "verifier_accuracy": 1.0,
+  "naive_always_trust_accuracy": 0.5,
+  "accuracy_gain_from_verification_layer": 0.5,
+  "supported_class": {
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0
+  },
+  "unsupported_class": {
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0
+  },
+  "confusion_matrix_labels": [
+    "supported",
+    "unsupported"
+  ],
+  "confusion_matrix": [
+    [
+      5,
+      0
+    ],
+    [
+      0,
+      5
+    ]
+  ],
+  "records": [
+    {
+      "claim": "The speaker discusses not knowing who funds certain political advertisements.",
+      "timestamp": 18,
+      "ground_truth_supported": true,
+      "predicted_supported": true,
+      "confidence": 0.9,
+      "explanation": "The transcript at 17s-22s explicitly states 'We don't know who's behind these ads, and we don't know who's paying for them', which directly supports the claim about the speaker discussing not knowing who funds certain political advertisements.",
+      "correct": true
+    },
+    {
+      "claim": "The speaker references a Supreme Court decision related to campaign spending.",
+      "timestamp": 23,
+      "ground_truth_supported": true,
+      "predicted_supported": true,
+      "confidence": 0.9,
+      "explanation": "The speaker explicitly mentions a Supreme Court decision in the Citizens United case, which is related to campaign spending.",
+      "correct": true
+    },
+    {
+      "claim": "The speaker says the ad sponsors don't have to disclose who is paying for them.",
+      "timestamp": 39,
+      "ground_truth_supported": true,
+      "predicted_supported": true,
+      "confidence": 0.9,
+      "explanation": "The transcript at 37s-43s directly states 'And worst of all, they don't even have to reveal who is actually paying for them', which aligns with the claim about ad sponsors not having to disclose who is paying for them.",
+      "correct": true
+    },
+    {
+      "claim": "The speaker describes blocking a vote on an issue in the legislature.",
+      "timestamp": 106,
+      "ground_truth_supported": true,
+      "predicted_supported": true,
+      "confidence": 0.9,
+      "explanation": "The transcript at 105s-110s explicitly mentions 'block the issue from even coming up for a vote', which directly supports the claim.",
+      "correct": true
+    },
+    {
+      "claim": "The speaker argues the issue shouldn't be split along party lines.",
+      "timestamp": 195,
+      "ground_truth_supported": true,
+      "predicted_supported": true,
+      "confidence": 0.9,
+      "explanation": "The speaker explicitly states 'This shouldn't be a Democratic issue or a Republican issue', directly supporting the claim that the issue shouldn't be split along party lines.",
+      "correct": true
+    },
+    {
+      "claim": "The speaker gives detailed instructions on how to plant a vegetable garden.",
+      "timestamp": 18,
+      "ground_truth_supported": false,
+      "predicted_supported": false,
+      "confidence": 0.0,
+      "explanation": "The evidence at the cited timestamp does not mention planting a vegetable garden, but instead discusses political ads and a Supreme Court decision.",
+      "correct": true
+    },
+    {
+      "claim": "The speaker announces a new international trade agreement with Canada.",
+      "timestamp": 23,
+      "ground_truth_supported": false,
+      "predicted_supported": false,
+      "confidence": 0.0,
+      "explanation": "The transcript at the cited timestamp does not mention a new international trade agreement with Canada.",
+      "correct": true
+    },
+    {
+      "claim": "The speaker discusses the results of a recent basketball championship.",
+      "timestamp": 39,
+      "ground_truth_supported": false,
+      "predicted_supported": false,
+      "confidence": 0.0,
+      "explanation": "The evidence at the cited timestamp discusses elections, TV ads, and campaign finance, with no mention of a basketball championship.",
+      "correct": true
+    },
+    {
+      "claim": "The speaker explains how to file annual tax returns.",
+      "timestamp": 106,
+      "ground_truth_supported": false,
+      "predicted_supported": false,
+      "confidence": 0.0,
+      "explanation": "The evidence at the cited timestamp discusses partisan issues and Congressional actions, with no mention of filing annual tax returns.",
+      "correct": true
+    },
+    {
+      "claim": "The speaker talks about the history of the national highway system.",
+      "timestamp": 195,
+      "ground_truth_supported": false,
+      "predicted_supported": false,
+      "confidence": 0.0,
+      "explanation": "The transcript at the cited timestamp does not mention the national highway system or its history.",
+      "correct": true
+    }
+  ]
+}
