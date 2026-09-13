@@ -724,7 +724,7 @@ Based on the above evidence, provide a clear, professional answer to the user's 
     ]
 
     # Try primary model, then fallback model
-    models_to_try = [GROQ_MODEL, "openai/gpt-oss-20b"]
+    models_to_try = [GROQ_MODEL, "llama-3.3-70b-versatile"]
     for model_name in models_to_try:
         try:
             client = _get_groq_client()

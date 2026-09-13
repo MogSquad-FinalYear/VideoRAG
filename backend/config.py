@@ -56,9 +56,7 @@ if CAPTION_BACKEND not in {"clip", "blip"}:
 # Groq
 # Note: model catalogs change over time — if this starts 404ing, check
 # currently available models with client.models.list() and update here.
-# (llama-3.3-70b-versatile was retired from Groq's catalog; replaced 2026-09-13
-# with openai/gpt-oss-120b, confirmed live via client.models.list().)
-GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip()
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
 ENABLE_LLM_POLISH = os.getenv("ENABLE_LLM_POLISH", "false").strip().lower() == "true"
 
 # Server
