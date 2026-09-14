@@ -1,6 +1,17 @@
 """
 VideoRAG — CLIP Embedding Service
 Generates visual embeddings for frames and text queries using OpenCLIP.
+
+Also provides embed_text_dense() (SentenceTransformer) for pure text-to-text
+search (speech/caption/OCR indices). CLIP's text tower is trained for
+image-caption alignment, not text-to-text semantic search, and it's
+genuinely bad at domain-specific vocabulary — confirmed live: a query about
+"what medications" against a real transcript never surfaced any of the
+actual drug-name lines even at 60 candidates deep, because CLIP's text
+embedding space doesn't cluster clinical terms usefully. Only
+search_by_image/search_by_visual_similarity (query text vs. stored IMAGE
+embeddings) is genuinely cross-modal and must keep using CLIP's text tower,
+since that's the only embedding space the image vectors live in.
 """
 import logging
 import torch
@@ -18,6 +29,7 @@ _clip_model = None
 _clip_preprocess = None
 _clip_tokenizer = None
 _device = "cpu"
+_dense_text_model = None
 
 
 def load_clip_model():
@@ -60,6 +72,27 @@ def embed_text(text: str) -> list[float]:
         embedding = embedding / embedding.norm(dim=-1, keepdim=True)
 
     return embedding.cpu().numpy().flatten().tolist()
+
+
+def load_dense_text_model():
+    """Load the sentence-transformer text model once into memory."""
+    global _dense_text_model
+    if _dense_text_model is not None:
+        return
+    from sentence_transformers import SentenceTransformer
+    logger.info("Loading dense text embedding model (all-MiniLM-L6-v2)...")
+    _dense_text_model = SentenceTransformer("all-MiniLM-L6-v2")
+    logger.info("Dense text embedding model loaded successfully.")
+
+
+def embed_text_dense(text: str) -> list[float]:
+    """Generate a sentence-transformer embedding for text-to-text search
+    (speech/caption/OCR indices). NOT compatible with CLIP image embeddings —
+    different model, different vector space, different dimension (384 vs
+    CLIP's 512) — never mix these into the same collection."""
+    load_dense_text_model()
+    embedding = _dense_text_model.encode(text, normalize_embeddings=True)
+    return embedding.tolist()
 
 
 def embed_batch(image_paths: list[str], batch_size: int = 16) -> tuple[list[list[float]], list[str]]:

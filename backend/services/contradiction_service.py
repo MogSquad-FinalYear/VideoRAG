@@ -23,7 +23,11 @@ def _get_groq_client():
         if not GROQ_API_KEY:
             raise ValueError("GROQ_API_KEY is not set.")
         from groq import Groq
-        _groq_client = Groq(api_key=GROQ_API_KEY)
+        # max_retries=0: see backend/agent/agent.py's _get_groq_client for
+        # why -- the SDK's own retry-with-backoff on 429 (51+s per attempt,
+        # confirmed live) must not run before our models_to_try fallback gets
+        # a chance to try a model that still has quota.
+        _groq_client = Groq(api_key=GROQ_API_KEY, max_retries=0)
     return _groq_client
 
 
@@ -69,46 +73,61 @@ def check_contradiction(text_a: str, text_b: str) -> dict:
     if len(text_a.strip()) < 10 or len(text_b.strip()) < 10:
         return default
 
-    try:
-        client = _get_groq_client()
-        user_msg = f"""Statement A: "{text_a.strip()}"
+    client = _get_groq_client()
+    user_msg = f"""Statement A: "{text_a.strip()}"
 
 Statement B: "{text_b.strip()}"
 
 Are these statements contradictory, entailing, or unrelated?"""
 
-        result = client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": CONTRADICTION_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.0,
-            max_tokens=200,
-        )
-        text = result.choices[0].message.content.strip()
+    # Same fallback pattern as citation_service.verify_citation, for the same
+    # reason: GROQ_MODEL hitting its daily token limit shouldn't take down
+    # every contradiction check when a lighter fallback model still has
+    # headroom.
+    models_to_try = [GROQ_MODEL, "openai/gpt-oss-20b"]
+    last_error = None
+    for model_name in models_to_try:
+        try:
+            result = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": CONTRADICTION_PROMPT},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=0.0,
+                max_tokens=400,
+                # See citation_service.verify_citation for why: gpt-oss-family
+                # models can burn the token budget on internal reasoning
+                # before writing the actual JSON, truncating it. This is a
+                # short structured-output task, so keep reasoning minimal.
+                reasoning_effort="low",
+            )
+            text = result.choices[0].message.content.strip()
 
-        # Extract JSON from response
-        if "```" in text:
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.strip()
+            # Extract JSON from response
+            if "```" in text:
+                text = text.split("```")[1]
+                if text.startswith("json"):
+                    text = text[4:]
+                text = text.strip()
 
-        parsed = json.loads(text)
+            parsed = json.loads(text)
 
-        label = parsed.get("label", "UNRELATED").upper()
-        if label not in ("CONTRADICT", "ENTAIL", "UNRELATED"):
-            label = "UNRELATED"
+            label = parsed.get("label", "UNRELATED").upper()
+            if label not in ("CONTRADICT", "ENTAIL", "UNRELATED"):
+                label = "UNRELATED"
 
-        return {
-            "label": label,
-            "confidence": min(1.0, max(0.0, float(parsed.get("confidence", 0.5)))),
-            "explanation": parsed.get("explanation", ""),
-        }
-    except Exception as e:
-        logger.warning("Contradiction check failed: %s", e)
-        return default
+            return {
+                "label": label,
+                "confidence": min(1.0, max(0.0, float(parsed.get("confidence", 0.5)))),
+                "explanation": parsed.get("explanation", ""),
+            }
+        except Exception as e:
+            last_error = e
+            logger.warning("Contradiction check failed with model %s: %s", model_name, e)
+
+    logger.warning("All models failed for contradiction check: %s", last_error)
+    return default
 
 
 def scan_for_contradictions(case_id: str, video_id: str,

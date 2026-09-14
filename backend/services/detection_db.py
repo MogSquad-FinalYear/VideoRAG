@@ -110,6 +110,36 @@ def store_detections_batch(video_id: str, frame_paths: list[str],
     conn.close()
 
 
+def _class_name_variants(class_name: str) -> list[str]:
+    """Singular/plural variants to try when matching a user-supplied class
+    name against stored COCO class names. Confirmed live: the decouple LLM
+    passed through "chairs" (plural, matching the user's own phrasing "how
+    many chairs") against a database storing the COCO singular "chair", and
+    the exact-match lookup silently returned zero results even though 159
+    real chair detections existed for that video — the model then correctly
+    (from its truncated view) reported no detection data at all. Tries the
+    name as given, with a trailing "s" stripped, and with one added — covers
+    "chairs"->"chair" without breaking COCO classes that are inherently
+    already plural-shaped, like "scissors" or "skis" (those match on the
+    first, unmodified variant, so the extra candidates are just harmless
+    no-ops for them)."""
+    name = class_name.strip()
+    variants = [name]
+    if name.lower().endswith("s") and len(name) > 1:
+        variants.append(name[:-1])
+    else:
+        variants.append(name + "s")
+
+    # Irregular English plurals a trailing-"s" rule can't catch, for COCO
+    # classes people commonly ask about with the everyday plural.
+    irregular = {"people": "person", "mice": "mouse"}
+    lowered = name.lower()
+    if lowered in irregular:
+        variants.append(irregular[lowered])
+
+    return variants
+
+
 def count_objects(video_id: str, class_name: str = None,
                   start_time: float = None, end_time: float = None) -> dict:
     """
@@ -123,8 +153,10 @@ def count_objects(video_id: str, class_name: str = None,
     params = [video_id]
 
     if class_name:
-        query += " AND LOWER(object_class) = LOWER(?)"
-        params.append(class_name)
+        variants = _class_name_variants(class_name)
+        placeholders = ", ".join("LOWER(?)" for _ in variants)
+        query += f" AND LOWER(object_class) IN ({placeholders})"
+        params.extend(variants)
     if start_time is not None:
         query += " AND timestamp >= ?"
         params.append(start_time)
@@ -164,9 +196,11 @@ def locate_objects(video_id: str, class_name: str,
     Returns list of frames with object locations and spatial positions.
     """
     conn = _get_conn()
-    query = """SELECT frame_number, timestamp, object_class, x, y, w, h, confidence
-               FROM detections WHERE video_id = ? AND LOWER(object_class) = LOWER(?)"""
-    params = [video_id, class_name]
+    variants = _class_name_variants(class_name)
+    placeholders = ", ".join("LOWER(?)" for _ in variants)
+    query = f"""SELECT frame_number, timestamp, object_class, x, y, w, h, confidence
+               FROM detections WHERE video_id = ? AND LOWER(object_class) IN ({placeholders})"""
+    params = [video_id, *variants]
 
     if start_time is not None:
         query += " AND timestamp >= ?"
