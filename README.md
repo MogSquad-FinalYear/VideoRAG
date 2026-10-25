@@ -4,8 +4,6 @@
 
 **Multimodal retrieval-augmented generation for courtroom video evidence**
 
-<img src="vr.png" width="1000" alt="VideoRAG architecture">
-
 </div>
 
 VideoRAG is a full-stack forensic video analysis system. It ingests evidence
@@ -63,8 +61,6 @@ fallback behavior for several query and speaker-analysis paths.
 - **Forensic dashboard** — React UI for evidence upload, task progress, video
   selection and deletion, text/image chat, timestamped clip playback, speaker
   confirmation, testimony, and contradiction review.
-
-<img src="kubrik.png" width="1000" alt="VideoRAG forensic dashboard">
 
 ## Architecture
 
