@@ -18,3 +18,6 @@ Thumbs.db
 model_cache/
 *.pt
 .tex-local/
+docs/VideoRAG_Technical_Stack_and_Modules.pdf
+docs/VideoRAG_Technical_Stack_and_Modules.md
+tools/generate_tech_stack_pdf.py

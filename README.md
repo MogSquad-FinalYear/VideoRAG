@@ -18,12 +18,6 @@ decomposition, answer synthesis, contradiction classification, and citation
 verification when `GROQ_API_KEY` is configured; the application has local
 fallback behavior for several query and speaker-analysis paths.
 
-> [!NOTE]
-> A complete, code-derived architecture and module report is available as
-> [`docs/VideoRAG_Technical_Stack_and_Modules.pdf`](docs/VideoRAG_Technical_Stack_and_Modules.pdf)
-> with an editable Markdown source at
-> [`docs/VideoRAG_Technical_Stack_and_Modules.md`](docs/VideoRAG_Technical_Stack_and_Modules.md).
-
 ## Contents
 
 - [Core capabilities](#core-capabilities)
@@ -265,7 +259,6 @@ are logged without discarding an otherwise usable video index.
 | `eval_common.py` | Dataset registry, color-safe plotting style, metrics, and figure output helpers |
 | `test_*.py` | Repository-root integration/debug scripts for direct queries, strategies, legal features, and verification |
 | `paper/paper.tex` | Accompanying research paper using generated evaluation figures |
-| `tools/generate_tech_stack_pdf.py` | Reproducible ReportLab renderer for the Markdown technical reference and PDF |
 
 ## API surface
 
@@ -476,8 +469,7 @@ VideoRAG/
 ├── frontend/               React + Vite dashboard
 ├── evaluation/             methodology, scripts, results, and figures
 ├── paper/                  LaTeX research paper and figures
-├── docs/                   generated technical stack/module report
-├── tools/                  documentation PDF generator
+├── docs/assets/            architecture image
 ├── test_*.py               integration/debug scripts
 └── README.md
 ```
