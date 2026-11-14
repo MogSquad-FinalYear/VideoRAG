@@ -168,7 +168,7 @@ def index_captions(video_id: str, frame_paths: list[str], captions: list[str], t
     if not ids:
         return
 
-    embeddings = [embedding_service.embed_text(doc) for doc in documents]
+    embeddings = [embedding_service.embed_text_dense(doc) for doc in documents]
 
     batch_size = 500
     for start in range(0, len(ids), batch_size):
@@ -211,7 +211,7 @@ def index_transcripts(video_id: str, segments: list[dict]):
     if not ids:
         return
 
-    embeddings = [embedding_service.embed_text(doc) for doc in documents]
+    embeddings = [embedding_service.embed_text_dense(doc) for doc in documents]
 
     batch_size = 500
     for start in range(0, len(ids), batch_size):
@@ -292,7 +292,7 @@ def search_captions(query_text: str, n: int = 10, video_id: str = None) -> list[
     where = {"video_id": video_id} if video_id else None
     requested = max(1, n)
     probe_n = min(max(requested * 8, requested), count)
-    query_embedding = embedding_service.embed_text(query_text)
+    query_embedding = embedding_service.embed_text_dense(query_text)
     try:
         results = _caption_col.query(
             query_embeddings=[query_embedding],
@@ -414,7 +414,7 @@ def search_transcripts(query_text: str, n: int = 10, video_id: str = None) -> li
         return []
 
     where = {"video_id": video_id} if video_id else None
-    query_embedding = embedding_service.embed_text(query_text)
+    query_embedding = embedding_service.embed_text_dense(query_text)
     try:
         results = _speech_col.query(
             query_embeddings=[query_embedding],
@@ -558,7 +558,7 @@ def index_ocr(video_id: str, frame_paths: list[str], ocr_results: dict, timestam
         logger.info(f"No OCR text found for video {video_id}")
         return
 
-    embeddings = [embedding_service.embed_text(doc) for doc in documents]
+    embeddings = [embedding_service.embed_text_dense(doc) for doc in documents]
 
     batch_size = 500
     for start in range(0, len(ids), batch_size):
@@ -585,7 +585,7 @@ def search_ocr(query_text: str, n: int = 10, video_id: str = None) -> list[dict]
         return []
 
     where = {"video_id": video_id} if video_id else None
-    query_embedding = embedding_service.embed_text(query_text)
+    query_embedding = embedding_service.embed_text_dense(query_text)
     requested = max(1, n)
     probe_n = min(max(requested * 4, requested), count)
 

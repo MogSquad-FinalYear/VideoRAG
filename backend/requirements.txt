@@ -13,6 +13,7 @@ torchvision>=0.20.1
 Pillow>=11.0.0
 ImageHash>=4.3.1
 sentencepiece>=0.2.0
+sentence-transformers>=3.0.0
 
 # Object Detection & OCR (Phase 3-4)
 ultralytics>=8.3.0

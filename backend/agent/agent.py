@@ -47,7 +47,15 @@ def _get_groq_client():
                 "Get a free key at https://console.groq.com"
             )
         from groq import Groq
-        _groq_client = Groq(api_key=GROQ_API_KEY)
+        # max_retries=0: the SDK's default (2) retries the SAME rate-limited
+        # model, honoring the 429's Retry-After header -- confirmed live at
+        # 51+ seconds per attempt. That happens BEFORE the exception ever
+        # reaches our own models_to_try fallback loop, so the app-level
+        # fallback to a model with headroom was effectively unreachable
+        # within any normal request timeout. Fail fast instead and let our
+        # own fallback (see run_agent, verify_citation, check_contradiction)
+        # try the next model immediately.
+        _groq_client = Groq(api_key=GROQ_API_KEY, max_retries=0)
         logger.info("Groq client initialized.")
     return _groq_client
 
@@ -181,7 +189,10 @@ Rules:
 - For relation questions ("what is next to X"), set answer_type="relation" and need_relations=true
 - For speech/dialog questions, set asr_query and answer_type="description"
 - For visual search ("show me X"), set visual_query and caption_query
-- For text/reading questions, set ocr_query
+- For text/reading questions, set ocr_query to a short search phrase describing
+  the on-screen text being asked about (e.g. "exhibit label", "case number",
+  "on-screen text", "caption overlay") — never an empty string; use null if OCR
+  truly isn't relevant to the question
 - For consistency/contradiction questions ("did the witness contradict", "testimony consistency", "changed their story"), set check_contradictions=true and answer_type="contradiction"
 - Always include visual_query and caption_query for general questions
 - Always include asr_query for general or description or contradiction questions — speech transcripts are the richest source of courtroom evidence
@@ -205,36 +216,51 @@ def _decouple_query(query: str) -> dict:
     if not GROQ_API_KEY:
         return default
 
-    try:
-        client = _get_groq_client()
-        result = client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": DECOUPLE_PROMPT},
-                {"role": "user", "content": f"User query: \"{query}\""},
-            ],
-            temperature=0.0,
-            max_tokens=300,
-        )
-        text = result.choices[0].message.content.strip()
+    client = _get_groq_client()
+    # Same fallback pattern as citation_service.verify_citation: GROQ_MODEL
+    # hitting its daily token limit shouldn't force every query onto the
+    # crude keyword-heuristic fallback below when a lighter model still has
+    # headroom to do this properly.
+    models_to_try = [GROQ_MODEL, "openai/gpt-oss-20b"]
+    last_error = None
+    for model_name in models_to_try:
+        try:
+            result = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": DECOUPLE_PROMPT},
+                    {"role": "user", "content": f"User query: \"{query}\""},
+                ],
+                temperature=0.0,
+                max_tokens=400,
+                # See citation_service.verify_citation for why: gpt-oss-family
+                # models can burn the token budget on internal reasoning
+                # before writing the actual JSON, truncating it. This is a
+                # short structured-output task, so keep reasoning minimal.
+                reasoning_effort="low",
+            )
+            text = result.choices[0].message.content.strip()
 
-        # Extract JSON from response (handle markdown code blocks)
-        if "```" in text:
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.strip()
+            # Extract JSON from response (handle markdown code blocks)
+            if "```" in text:
+                text = text.split("```")[1]
+                if text.startswith("json"):
+                    text = text[4:]
+                text = text.strip()
 
-        parsed = json.loads(text)
-        # Validate and merge with defaults
-        for key in default:
-            if key not in parsed:
-                parsed[key] = default[key]
-        logger.info(f"Query decoupled: answer_type={parsed['answer_type']}, det_classes={parsed['det_classes']}")
-        return parsed
-    except Exception as e:
-        logger.warning(f"Query decouple failed, using defaults: {e}")
-        return default
+            parsed = json.loads(text)
+            # Validate and merge with defaults
+            for key in default:
+                if key not in parsed:
+                    parsed[key] = default[key]
+            logger.info(f"Query decoupled: answer_type={parsed['answer_type']}, det_classes={parsed['det_classes']}")
+            return parsed
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Query decouple failed with model {model_name}: {e}")
+
+    logger.warning(f"Query decouple failed on all models, using defaults: {last_error}")
+    return default
 
 
 # ── Tool Execution ───────────────────────────────────────────────────────────
@@ -447,10 +473,20 @@ def _collect_sources_decoupled(query: str, decouple: dict, video_id: str = None,
     # ── ASR search ───────────────────────────────────────────────────────
     if decouple.get("asr_query"):
         used_strategies.append("speech/transcript")
+        # n=20, not 12: confirmed live failure where the one sentence that
+        # actually names a witness ("...witness list regarding Ms.
+        # Thorndike") ranked 12th of 12 candidates -- semantically it reads
+        # as bureaucratic ("motion for addition to the witness list") while
+        # the query matches more strongly against the many vaguer "this
+        # witness"/"that particular witness" pronoun references scattered
+        # through the rest of the argument. A single-fact naming sentence
+        # will often rank below several vaguer paraphrases of the question
+        # itself, so named-entity questions need real headroom, not just a
+        # slightly wider net.
         speech_hits = json.loads(_execute_tool("search_transcripts", {
             "query": decouple["asr_query"],
             "video_id": video_id,
-            "n": 12,
+            "n": 20,
         }))
         if isinstance(speech_hits, list):
             sources.extend(speech_hits)
@@ -694,7 +730,11 @@ You analyze multimodal evidence from a video retrieval system. You receive struc
 
 ## CRITICAL RULES
 1. Base your answer ONLY on the provided evidence — do NOT fabricate details.
-2. Report timestamps in [MM:SS] format.
+2. Report EVERY timestamp wrapped in literal square brackets, exactly like
+   [MM:SS] or [MM:SS – MM:SS] — including inside markdown tables and bold
+   text. Correct: "| **[00:48 – 00:51]** | ... |". Wrong: "| **00:48 – 00:51** | ... |"
+   (missing brackets). This is not optional formatting — downstream citation
+   verification parses these brackets and silently finds nothing without them.
 3. Group consecutive timestamps into ranges.
 4. Be specific about what the evidence shows.
 5. State confidence level when relevant.
@@ -724,7 +764,7 @@ Based on the above evidence, provide a clear, professional answer to the user's 
     ]
 
     # Try primary model, then fallback model
-    models_to_try = [GROQ_MODEL, "llama-3.3-70b-versatile"]
+    models_to_try = [GROQ_MODEL, "openai/gpt-oss-20b"]
     for model_name in models_to_try:
         try:
             client = _get_groq_client()
@@ -955,6 +995,22 @@ def run_agent(query: str, video_id: str = None, image_path: str = None,
         if not decouple.get("asr_query") and decouple.get("answer_type") in ("general", "description", "contradiction"):
             decouple["asr_query"] = query
 
+        # Heuristic fallback: LLM sometimes "sets" ocr_query to "" instead of
+        # a real search phrase or null (both falsy, but "" silently means the
+        # OCR index — e.g. on-screen text/watermarks/exhibit labels — never
+        # gets searched even when the question is explicitly about on-screen
+        # text). Confirmed live: "what text is visible on screen?" produced
+        # ocr_query="" and the answer wrongly claimed no OCR data existed,
+        # despite 100 real OCR entries for that video.
+        if not decouple.get("ocr_query"):
+            ocr_keywords = [
+                "text", "screen", "written", "label", "caption", "exhibit",
+                "watermark", "on-screen", "onscreen", "displayed", "read",
+                "sign", "banner",
+            ]
+            if any(kw in q_lower for kw in ocr_keywords):
+                decouple["ocr_query"] = query
+
         logger.info("Final decouple: %s", json.dumps(decouple, indent=2))
 
     # ── Stage ②: Multimodal Retrieval ────────────────────────────────────
@@ -987,7 +1043,14 @@ def run_agent(query: str, video_id: str = None, image_path: str = None,
         max_results = 5
         max_describe = 3
     else:
-        max_results = 5
+        # Confirmed live failure at max_results=5: a real, correctly-retrieved
+        # named-entity line ("...witness list regarding Ms. Thorndike") ranked
+        # 12th of 20 ASR candidates and got silently trimmed before reaching
+        # answer synthesis, so the model correctly (from its truncated view)
+        # said no name was provided. max_results=12 actually reaches that
+        # position; max_describe stays capped separately since BLIP/CLIP
+        # description enrichment is the expensive part.
+        max_results = 12
         max_describe = 3
 
     sources = sources[:max_results]

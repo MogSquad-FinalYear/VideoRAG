@@ -56,12 +56,31 @@ if CAPTION_BACKEND not in {"clip", "blip"}:
 # Groq
 # Note: model catalogs change over time — if this starts 404ing, check
 # currently available models with client.models.list() and update here.
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+# (llama-3.3-70b-versatile was retired from Groq's catalog; replaced 2026-09-13
+# with openai/gpt-oss-120b — compared against qwen/qwen3.8-27b and
+# groq/compound on this pipeline's actual prompts: gpt-oss-120b and compound
+# were equally strong, qwen hallucinated a speaker role that wasn't in the
+# evidence. Picked gpt-oss-120b over compound since it's a plain LLM, not an
+# agentic/tool-calling system, which matters for staying strictly grounded
+# in retrieved evidence rather than doing anything unpredictable off to the
+# side.)
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip()
 ENABLE_LLM_POLISH = os.getenv("ENABLE_LLM_POLISH", "false").strip().lower() == "true"
 
 # Server
 BACKEND_PORT = int(os.getenv("BACKEND_PORT", "8000"))
 FRONTEND_PORT = int(os.getenv("FRONTEND_PORT", "5173"))
+
+# CORS — comma-separated list of allowed origins, or "*" for any origin.
+# Defaults to "*" because the dev frontend's actual port drifts (Vite bumps
+# to the next free port whenever its configured one is taken), so pinning
+# this to one hardcoded "http://localhost:XXXX" string is fragile — it
+# silently breaks the moment the frontend starts on a different port, and
+# "localhost" vs "127.0.0.1" are different origins to a browser even though
+# they're the same machine.
+CORS_ORIGINS = [
+    o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()
+]
 
 # ChromaDB collections
 IMAGE_COLLECTION = os.getenv("IMAGE_COLLECTION", "image_index")

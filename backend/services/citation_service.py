@@ -29,7 +29,11 @@ def _get_groq_client():
         if not GROQ_API_KEY:
             raise ValueError("GROQ_API_KEY is not set.")
         from groq import Groq
-        _groq_client = Groq(api_key=GROQ_API_KEY)
+        # max_retries=0: see backend/agent/agent.py's _get_groq_client for
+        # why -- the SDK's own retry-with-backoff on 429 (51+s per attempt,
+        # confirmed live) must not run before our models_to_try fallback gets
+        # a chance to try a model that still has quota.
+        _groq_client = Groq(api_key=GROQ_API_KEY, max_retries=0)
     return _groq_client
 
 
@@ -48,7 +52,16 @@ def extract_citations_from_answer(answer: str) -> list[dict]:
     # range (the answer-generation prompt explicitly asks the LLM to group
     # consecutive timestamps into ranges, so this format is common — the
     # range's end is ignored, we cite/verify against its start).
-    pattern = r'\[(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s*[-–]\s*\d{1,2}:\d{2}(?::\d{2})?)?\]'
+    #
+    # Brackets are made optional (\[? \]?) rather than required: the prompt
+    # asks the LLM for [MM:SS], but some models (e.g. when they choose to
+    # render a markdown table) drop the brackets and emit bare **MM:SS**
+    # instead, which would otherwise silently produce zero citations. A
+    # missed real timestamp is worse here than an occasional stray
+    # MM:SS-shaped false positive, since verify_citation() below still has
+    # to find real supporting evidence before anything is marked "verified" —
+    # an unmatched context just becomes a low-confidence "unsupported" entry.
+    pattern = r'\[?(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s*[-–]\s*\d{1,2}:\d{2}(?::\d{2})?)?\]?'
     for match in re.finditer(pattern, answer):
         full_match = match.group(0)
         parts = [int(x) for x in match.groups() if x is not None]
@@ -253,9 +266,8 @@ def verify_citation(claim_text: str, cited_timestamp: float,
 
     evidence_text = "\n".join(evidence_parts[:5])  # Limit evidence
 
-    try:
-        client = _get_groq_client()
-        user_msg = f"""CLAIM: "{claim_text}"
+    client = _get_groq_client()
+    user_msg = f"""CLAIM: "{claim_text}"
 
 CITED TIMESTAMP: {cited_timestamp:.0f} seconds in video {video_id}
 
@@ -264,32 +276,55 @@ EVIDENCE AT TIMESTAMP:
 
 Does this evidence support the claim?"""
 
-        result = client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": VERIFY_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.0,
-            max_tokens=200,
-        )
-        text = result.choices[0].message.content.strip()
+    # Confirmed live: GROQ_MODEL (openai/gpt-oss-120b) hitting its daily
+    # token limit takes down EVERY citation on an otherwise-successful
+    # answer (0/4, 0/5, 0/10 verified) even though _merge_and_rearrange's
+    # own models_to_try fallback let the answer itself generate fine on
+    # gpt-oss-20b — this function had no such fallback, so a rate-limited
+    # primary model meant every citation silently became "unsupported,
+    # confidence 0.0 / Verification unavailable" instead of an honest
+    # attempt on a model that still had headroom.
+    models_to_try = [GROQ_MODEL, "openai/gpt-oss-20b"]
+    last_error = None
+    for model_name in models_to_try:
+        try:
+            result = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": VERIFY_PROMPT},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=0.0,
+                max_tokens=400,
+                # reasoning_effort="low": gpt-oss-family models spend part of
+                # max_tokens on an internal reasoning pass before writing the
+                # actual JSON — at default effort that reasoning can consume
+                # the whole budget and truncate the JSON mid-string (silent
+                # failure). This is a short structured-output task that
+                # doesn't need heavy reasoning, so capping it low leaves the
+                # budget for the answer.
+                reasoning_effort="low",
+            )
+            text = result.choices[0].message.content.strip()
 
-        if "```" in text:
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.strip()
+            if "```" in text:
+                text = text.split("```")[1]
+                if text.startswith("json"):
+                    text = text[4:]
+                text = text.strip()
 
-        parsed = json.loads(text)
-        return {
-            "supported": bool(parsed.get("supported", False)),
-            "confidence": min(1.0, max(0.0, float(parsed.get("confidence", 0.5)))),
-            "explanation": parsed.get("explanation", ""),
-        }
-    except Exception as e:
-        logger.warning("Citation verification failed: %s", e)
-        return default
+            parsed = json.loads(text)
+            return {
+                "supported": bool(parsed.get("supported", False)),
+                "confidence": min(1.0, max(0.0, float(parsed.get("confidence", 0.5)))),
+                "explanation": parsed.get("explanation", ""),
+            }
+        except Exception as e:
+            last_error = e
+            logger.warning("Citation verification failed with model %s: %s", model_name, e)
+
+    logger.warning("All models failed for citation verification: %s", last_error)
+    return default
 
 
 def verify_and_store_citations(answer: str, video_id: str,
