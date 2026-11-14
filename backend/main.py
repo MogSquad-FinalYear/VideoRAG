@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from backend.config import FRAMES_DIR, DATA_DIR
+from backend.config import FRAMES_DIR, DATA_DIR, CORS_ORIGINS
 
 # Configure logging
 logging.basicConfig(
@@ -22,10 +22,10 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# CORS — allow frontend
+# CORS — allow the frontend's origin (see backend/config.py:CORS_ORIGINS)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

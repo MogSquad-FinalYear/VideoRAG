@@ -71,6 +71,17 @@ ENABLE_LLM_POLISH = os.getenv("ENABLE_LLM_POLISH", "false").strip().lower() == "
 BACKEND_PORT = int(os.getenv("BACKEND_PORT", "8000"))
 FRONTEND_PORT = int(os.getenv("FRONTEND_PORT", "5173"))
 
+# CORS — comma-separated list of allowed origins, or "*" for any origin.
+# Defaults to "*" because the dev frontend's actual port drifts (Vite bumps
+# to the next free port whenever its configured one is taken), so pinning
+# this to one hardcoded "http://localhost:XXXX" string is fragile — it
+# silently breaks the moment the frontend starts on a different port, and
+# "localhost" vs "127.0.0.1" are different origins to a browser even though
+# they're the same machine.
+CORS_ORIGINS = [
+    o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()
+]
+
 # ChromaDB collections
 IMAGE_COLLECTION = os.getenv("IMAGE_COLLECTION", "image_index")
 CAPTION_COLLECTION = os.getenv("CAPTION_COLLECTION", "caption_index_clip")
